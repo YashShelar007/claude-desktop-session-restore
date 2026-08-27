@@ -132,11 +132,32 @@ potentially its `transcriptUnavailable: true` onto everything it writes.
 
 **Artifacts across accounts.** Sessions migrated from a machine signed into a
 different account show every artifact as unavailable, because artifacts are
-server-side and account-scoped. Nothing local can fix this and the current
-message — "not available or might be deleted" — reads as data loss when the data
-is fine and simply belongs to another account. A clearer message ("published by
-a different account") would save some confusion. The app has what it needs to
-say so: the record's own position in the `<accountUuid>/<orgUuid>` tree.
+server-side and account-scoped. Confirmed from both ends: the source machine's
+transcripts and all 26 referenced artifact UUIDs belong to account A, while the
+destination machine is signed in as account B and its index contains only B's
+folder.
+
+Nothing local can fix it, and the current message — "not available or might be
+deleted" — reads as data loss when the data is fine and simply belongs to
+another account. A clearer message ("published by a different account") would
+save some confusion. The app has what it needs to say so: the record's own
+position in the `<accountUuid>/<orgUuid>` tree.
+
+There is a second, sharper version of this. Because the picker only reads the
+signed-in account's folder, a user who restores sessions while signed in as B
+and later signs in as A does not see a partial result — they see an empty
+picker, with no indication that their sessions exist one folder over. The two
+halves cannot currently both be satisfied:
+
+| Signed in as | Sessions visible | Artifacts resolve |
+|---|---|---|
+| B (where records were written) | yes | no |
+| A (which owns the artifacts) | no | yes |
+
+An adoption pass fixes this for free: if the app can materialise records from
+transcripts, it materialises them for whichever account is signed in, and the
+choice disappears. Absent that, surfacing "N sessions found under another
+account" in the empty picker would at least make the state legible.
 
 ## What was actually verified
 
@@ -152,3 +173,5 @@ say so: the record's own position in the `<accountUuid>/<orgUuid>` tree.
   3 against 531. See [SCHEMA.md](SCHEMA.md) for the exact predicate.
 - Directory order is `<accountUuid>/<orgUuid>`, confirmed three independent
   ways. An earlier revision of SCHEMA.md claimed the reverse; that was wrong.
+- Artifact account-scoping confirmed on both machines: the account owning the
+  transcripts and artifacts is signed in on neither.
