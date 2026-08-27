@@ -167,11 +167,25 @@ python3 restore_desktop_sessions.py --cwd-prefix /Users/you/repos --apply
 | `-MinIdleMinutes N` | Skip transcripts touched in the last N minutes (default 2). |
 | `-IndexDir` / `-ProjectsRoot` | Override auto-detection. |
 | `-CoreThreshold F` | Keep fields present in ≥F of app-written records (default 0.9). |
+| `-Account UUID` | Write into this account's folder instead of the one with the most records. |
 | `-NoBackup` | Skip the pre-write backup. Not recommended. |
 
 The Python flags are the same names in lower kebab-case: `--apply`, `--limit`,
 `--cwd-prefix`, `--include-deleted`, `--min-idle-minutes`, `--index-dir`,
-`--projects-root`, `--core-threshold`, `--no-backup`.
+`--projects-root`, `--core-threshold`, `--account`, `--no-backup`.
+
+### Accounts
+
+The index is partitioned by account, and records are only visible to the account
+whose folder they are in. Both scripts read the two signals that reveal a
+mismatch and warn before writing:
+
+- `~/.claude.json` → `oauthAccount.accountUuid` — who authored the transcripts,
+  and therefore who owns any artifacts those sessions published
+- `config.json` → `lastKnownAccountUuid` — which account the picker is showing
+
+If the target folder disagrees with either, you get a warning explaining which
+symptom to expect. Use `--account` / `-Account` to target a specific one.
 
 Every run with `-Apply` copies the whole index to
 `claude-code-sessions_backup_<timestamp>` alongside it first, and prints the
@@ -207,11 +221,25 @@ nothing and suggests the app has never run.
   signed into a different account will show their artifacts as unavailable, and
   nothing on disk can change that. Conversation history is unaffected.
 
-  This is now confirmed rather than inferred. On the source machine the index
-  holds three accounts; the 65 migrated sessions, every transcript, and all 26
-  referenced artifact UUIDs belong to one of them, and the Desktop app is signed
-  in as a different one. `~/.claude.json` (`oauthAccount`), `config.json`
-  (`lastKnownAccountUuid`) and the app's telemetry all agree on the split.
+  Confirmed from both ends, not inferred. On the source machine the sessions,
+  transcripts and all 26 referenced artifact UUIDs belong to account **A**
+  (`~/.claude.json` → `oauthAccount`). The destination machine's Desktop is
+  signed in as account **B** (`config.json` → `lastKnownAccountUuid`), and its
+  index contains exactly one account folder — B's. So all restored records live
+  under an account that never authored those sessions. History restores because
+  it is read from the local transcript; artifacts don't because they are
+  resolved server-side against the signed-in account.
+
+  This leaves a choice rather than a bug, and it is worth knowing before you
+  run anything:
+
+  | Signed in as | Sessions in the picker | Artifacts |
+  |---|---|---|
+  | B (where the records were written) | yes | unavailable |
+  | A (which owns the artifacts) | no — wrong account folder | resolve |
+
+  To get both, restore into A's folder with `--account A` while signed in as A.
+  Both scripts now detect and warn about each half of this.
 - **Some builds prune records.**
   [#63082](https://github.com/anthropics/claude-code/issues/63082) reports a
   startup scanner in Desktop 2.1.144–2.1.145 stripping `cliSessionId` and

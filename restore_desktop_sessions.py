@@ -143,7 +143,56 @@ def resolve_index_root(override):
     )
 
 
-def resolve_account_dir(index_root):
+def read_account_signals(index_root):
+    """Which account authored the transcripts, and which one is the app showing?
+
+    Two different questions, two different files, and they can disagree --
+    which is exactly the confusing case this warns about.
+
+    - ~/.claude.json oauthAccount.accountUuid is the account the CLI is signed
+      in as, so it owns the transcripts under ~/.claude/projects/ and anything
+      those sessions published server-side (artifacts).
+    - config.json lastKnownAccountUuid is the account the Desktop app is
+      showing. The picker only reads that account's folder.
+    """
+    cli_account = cli_org = app_account = None
+    try:
+        with open(os.path.join(os.path.expanduser("~"), ".claude.json"),
+                  encoding="utf-8-sig") as f:
+            oa = json.load(f).get("oauthAccount") or {}
+        cli_account = oa.get("accountUuid")
+        cli_org = oa.get("organizationUuid")
+    except Exception:
+        pass
+    try:
+        with open(os.path.join(os.path.dirname(index_root), "config.json"),
+                  encoding="utf-8-sig") as f:
+            app_account = json.load(f).get("lastKnownAccountUuid")
+    except Exception:
+        pass
+    return cli_account, cli_org, app_account
+
+
+def warn_account_mismatch(account, cli_account, app_account):
+    """Two failure modes that look like bugs but are account scoping."""
+    if app_account and app_account != account:
+        warn("The Desktop app is signed in as a DIFFERENT account:")
+        print("      writing into : %s" % account)
+        print("      app shows    : %s" % app_account)
+        print("      Records written here are correct but will not appear in the")
+        print("      picker until you sign in as the first account. Use --account")
+        print("      to target the signed-in one instead.")
+    if cli_account and cli_account != account:
+        warn("The transcripts were authored by a DIFFERENT account:")
+        print("      writing into : %s" % account)
+        print("      authored by  : %s" % cli_account)
+        print("      Conversation history will restore in full -- it is read from")
+        print("      the local transcript. Artifacts published in these sessions")
+        print("      are server-side and account-scoped, so they will show as")
+        print("      unavailable. Nothing on disk can change that.")
+
+
+def resolve_account_dir(index_root, want_account=None):
     """Layout is <accountUuid>/<orgUuid>/local_*.json -- account first."""
     pairs = []
     for acct in sorted(glob.glob(os.path.join(index_root, "*", "*"))):
@@ -154,6 +203,14 @@ def resolve_account_dir(index_root):
     if not pairs:
         sys.exit("No <accountUuid>/<orgUuid> folder pair under %s.\n"
                  "Start a session in the app first." % index_root)
+    if want_account:
+        match = [p for _, p in pairs if p.split(os.sep)[-2] == want_account]
+        if not match:
+            sys.exit("No folder for account %s under %s.\nFound: %s"
+                     % (want_account, index_root,
+                        ", ".join(sorted({p.split(os.sep)[-2] for _, p in pairs}))))
+        return match[0]
+
     pairs.sort(key=lambda x: -x[0])
     if len(pairs) > 1:
         warn("Multiple account/org folders found; using the one with the most records:")
@@ -346,6 +403,9 @@ def main():
     ap.add_argument("--limit", type=int, default=0, metavar="N",
                     help="Only the N most recently active.")
     ap.add_argument("--index-dir", help="Override index auto-detection.")
+    ap.add_argument("--account", metavar="UUID",
+                    help="Write into this account's folder instead of the one "
+                         "with the most records.")
     ap.add_argument("--projects-root", help="Override ~/.claude/projects.")
     ap.add_argument("--include-deleted", action="store_true",
                     help="Re-index tombstoned sessions. Off by default.")
@@ -360,10 +420,13 @@ def main():
 
     step("Locating the Claude Desktop session index")
     index_root = resolve_index_root(args.index_dir)
-    acct_dir = resolve_account_dir(index_root)
+    acct_dir = resolve_account_dir(index_root, args.account)
     account, org = acct_dir.split(os.sep)[-2:]
     ok("index:   %s" % acct_dir)
     ok("account=%s  org=%s" % (account, org))
+
+    cli_account, _cli_org, app_account = read_account_signals(index_root)
+    warn_account_mismatch(account, cli_account, app_account)
 
     manifest_path = os.path.join(acct_dir, MANIFEST)
     authored = set()

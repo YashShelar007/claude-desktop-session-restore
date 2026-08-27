@@ -35,6 +35,10 @@
   Override index auto-detection. Point at the folder CONTAINING the
   <accountUuid>/<orgUuid> pair.
 
+.PARAMETER Account
+  Write into this account's folder instead of the one with the most records.
+  Records only appear in the picker for the account the app is signed in as.
+
 .PARAMETER ProjectsRoot
   Override the transcript root (default: ~/.claude/projects).
 
@@ -69,6 +73,7 @@ param(
   [string] $CwdPrefix,
   [int]    $Limit = 0,
   [string] $IndexDir,
+  [string] $Account,
   [string] $ProjectsRoot,
   [switch] $IncludeDeleted,
   [int]    $MinIdleMinutes = 2,
@@ -157,8 +162,52 @@ function Resolve-IndexRoot {
   return $found[0]
 }
 
-function Resolve-AccountDir {
+function Get-AccountSignals {
+  # Which account authored the transcripts, and which one is the app showing?
+  # Two different questions, two different files, and they can disagree --
+  # which is exactly the confusing case this warns about.
   param([string]$IndexRoot)
+
+  $cliAccount = $null; $appAccount = $null
+  $claudeJson = Join-Path $HOME '.claude.json'
+  if (Test-Path $claudeJson) {
+    try {
+      $oa = (Get-Content $claudeJson -Raw -Encoding UTF8 | ConvertFrom-Json).oauthAccount
+      if ($oa) { $cliAccount = $oa.accountUuid }
+    } catch { }
+  }
+  $cfg = Join-Path (Split-Path $IndexRoot -Parent) 'config.json'
+  if (Test-Path $cfg) {
+    try { $appAccount = (Get-Content $cfg -Raw -Encoding UTF8 | ConvertFrom-Json).lastKnownAccountUuid } catch { }
+  }
+  [pscustomobject]@{ CliAccount = $cliAccount; AppAccount = $appAccount }
+}
+
+function Write-AccountMismatch {
+  # Two failure modes that look like bugs but are account scoping.
+  param([string]$Account, $Signals)
+
+  if ($Signals.AppAccount -and $Signals.AppAccount -ne $Account) {
+    Write-Warn 'The Desktop app is signed in as a DIFFERENT account:'
+    Write-Host "      writing into : $Account"
+    Write-Host "      app shows    : $($Signals.AppAccount)"
+    Write-Host '      Records written here are correct but will not appear in the'
+    Write-Host '      picker until you sign in as the first account. Use -Account'
+    Write-Host '      to target the signed-in one instead.'
+  }
+  if ($Signals.CliAccount -and $Signals.CliAccount -ne $Account) {
+    Write-Warn 'The transcripts were authored by a DIFFERENT account:'
+    Write-Host "      writing into : $Account"
+    Write-Host "      authored by  : $($Signals.CliAccount)"
+    Write-Host '      Conversation history will restore in full -- it is read from'
+    Write-Host '      the local transcript. Artifacts published in these sessions'
+    Write-Host '      are server-side and account-scoped, so they will show as'
+    Write-Host '      unavailable. Nothing on disk can change that.'
+  }
+}
+
+function Resolve-AccountDir {
+  param([string]$IndexRoot, [string]$WantAccount)
 
   # Layout: <root>/<accountUuid>/<orgUuid>/local_*.json -- account FIRST.
   # Confirmed on macOS three ways: ~/.claude.json oauthAccount, config.json
@@ -178,6 +227,14 @@ function Resolve-AccountDir {
 
   if (-not $pairs) {
     throw "No <accountUuid>/<orgUuid> folder pair under $IndexRoot. Start a session in the app first."
+  }
+  if ($WantAccount) {
+    $match = @($pairs | Where-Object { $_.Account -eq $WantAccount })
+    if (-not $match) {
+      throw ("No folder for account $WantAccount under $IndexRoot." + [Environment]::NewLine +
+             "Found: " + (($pairs | Select-Object -ExpandProperty Account -Unique) -join ', '))
+    }
+    return ($match | Sort-Object Records -Descending | Select-Object -First 1)
   }
   if ($pairs.Count -gt 1) {
     Write-Warn 'Multiple account/org folders found; using the one with the most records:'
@@ -313,9 +370,11 @@ function Get-SessionTitle {
 
 Write-Step 'Locating the Claude Desktop session index'
 $indexRoot = Resolve-IndexRoot -Override $IndexDir
-$acct      = Resolve-AccountDir -IndexRoot $indexRoot
+$acct      = Resolve-AccountDir -IndexRoot $indexRoot -WantAccount $Account
 Write-Ok "index:   $($acct.Path)"
 Write-Ok "account=$($acct.Account)  org=$($acct.Org)"
+
+Write-AccountMismatch -Account $acct.Account -Signals (Get-AccountSignals -IndexRoot $indexRoot)
 
 $manifestPath = Join-Path $acct.Path '.restore-manifest.json'
 $authored = @{}

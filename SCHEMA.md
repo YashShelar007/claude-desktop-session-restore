@@ -392,6 +392,20 @@ machine the sessions came from, and it is visible in three places that agree:
 `~/.claude.json` (`oauthAccount`), `config.json` (`lastKnownAccountUuid`), and
 the app's own telemetry blobs.
 
+Checked on the destination machine too. Its Desktop reports
+`lastKnownAccountUuid` = `69b16edc-…` and its index contains exactly one account
+folder, the same one — so every record the restore wrote there sits under an
+account that authored none of those sessions. That is the whole mechanism:
+
+| | authored the transcripts | signed in to Desktop |
+|---|---|---|
+| source machine (macOS) | `744b1c86-…` | `69b16edc-…` |
+| destination machine (Windows) | — | `69b16edc-…` |
+
+Artifacts belong to `744b1c86-…`; neither machine's app is showing that account.
+Conversation history is unaffected on both, because it comes from the transcript
+on disk.
+
 Artifacts are server-side and keyed to the publishing account. Nothing in the
 index, and nothing on disk, changes which account owns them — a restored session
 will show its conversation in full and its artifacts as unavailable whenever the
