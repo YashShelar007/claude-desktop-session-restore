@@ -84,9 +84,14 @@ tells you to create one, rather than guessing.
 **2. It honours deletion tombstones.**
 Deleting a session in the UI leaves a *pair* of files in the index folder,
 `deleted_<desktop sessionId>` and `deleted_<cliSessionId>`, each containing only
-a deletion timestamp in epoch milliseconds. No other tool appears to know these
-exist — which means re-running one resurrects every session you have ever
-deleted. The macOS machine confirms the mechanism at scale: **78 tombstones
+a deletion timestamp in epoch milliseconds.
+
+**None of the four tools listed above looks for them** — no match for
+`deleted_`, `deleted` or `tombstone` in any of their sources, checked against
+current `HEAD`. Each skips only sessions whose `local_*.json` is currently
+present, but deletion removes that file and leaves the transcript, so a deleted
+session is indistinguishable from a never-indexed one. Re-running any of them
+after deleting sessions in the UI brings them all back. The macOS machine confirms the mechanism at scale: **78 tombstones
 resolve into exactly 39 timestamp pairs, no singletons, no groups of three**,
 and a run without tombstone handling would bring back all 39 deleted sessions,
 whose transcripts are all still on disk.

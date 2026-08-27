@@ -264,6 +264,24 @@ before writing a record, or it will resurrect every session the user ever
 deleted. On this Mac that is 39 sessions whose transcripts are all still
 present — every one of them would come back.
 
+Verified against the four community tools' current sources: none contains a
+match for `deleted_`, `deleted` or `tombstone`.
+
+| Tool | Tombstone check | Only skips | `completedTurns` |
+|---|---|---|---|
+| `lacique77/claude-sidebar-restore` | none | `cliSessionId` already indexed | count of `assistant` lines |
+| `sahol3/claude-code-session-restorer` | none | `cliSessionId` already indexed | hardcoded `1` |
+| `ibrews/claude-session-recovery` | none | already-registered ids | hardcoded `1` |
+| `XPOL555`'s gist | none | already-registered ids | not written |
+
+The failure is structural rather than careless: deletion removes the
+`local_*.json` and leaves the transcript, so a deleted session presents exactly
+as a never-indexed one. Only the tombstone distinguishes them.
+
+The `completedTurns` column is worth reading alongside
+[the section below](#completedturns-resolved) — four implementations, four
+different answers, none matching what the app writes.
+
 ## Deriving a record from a transcript
 
 Transcripts are JSON Lines at
