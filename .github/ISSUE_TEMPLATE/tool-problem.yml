@@ -1,0 +1,43 @@
+name: Tool problem
+description: The restore script did something wrong
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **If sessions you deleted came back**, that's the tombstone path — please
+        say so explicitly, it's the highest-severity failure mode here.
+
+        **If nothing appears in the picker after a run**, check first that the
+        index folder you wrote into matches the account the app is signed in as.
+        Records written under a different account are correct but invisible.
+  - type: dropdown
+    id: impl
+    attributes:
+      label: Which implementation?
+      options: ["restore_desktop_sessions.py", "Restore-DesktopSessions.ps1"]
+    validations: { required: true }
+  - type: textarea
+    id: output
+    attributes:
+      label: Dry-run output
+      description: >
+        Run without `--apply` / `-Apply` and paste the output. Redact paths and
+        session titles as needed — the counts and the "structural core" lines
+        are the useful part.
+      render: text
+    validations: { required: true }
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect instead?
+    validations: { required: true }
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Confirm
+      options:
+        - label: My transcripts under `~/.claude/projects/` are intact
+          required: true
+        - label: I have a backup of the index (the script makes one unless `--no-backup`)
