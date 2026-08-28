@@ -19,3 +19,6 @@ venv/
 .DS_Store
 
 scratch/
+
+# Unposted issue-comment drafts. Working documents, not repo content.
+drafts/
