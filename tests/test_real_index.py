@@ -15,12 +15,11 @@ Nothing here writes anything.
 from __future__ import annotations
 
 import glob
-import json
 import os
 
 import pytest
 
-from claude_desktop_restore.index import find_transcripts
+from claude_desktop_restore.index import find_transcripts, load_manifest, split_records
 from claude_desktop_restore.paths import (
     IndexNotFound,
     list_account_dirs,
@@ -33,23 +32,45 @@ pytestmark = pytest.mark.real
 
 PROJECTS = os.path.join(os.path.expanduser("~"), ".claude", "projects")
 
+# Below this many matched sessions, a hit rate is not evidence of anything. The
+# repo's own claim standard applies to its tests: don't assert a rate from a
+# sample too small to support one.
+MIN_SAMPLE_FOR_RATES = 20
+
 
 @pytest.fixture(scope="module")
 def app_records():
+    """Records the *app* wrote. Records this tool wrote are excluded.
+
+    This matters more than it looks. On a machine where a previous run of this
+    tool forged records, grading a derivation against them is circular -- and if
+    those records came from an older version, it grades the new derivation
+    against the old version's bugs. ``.restore-manifest.json`` is what
+    distinguishes them, and it is the same exclusion the tool itself makes.
+    """
     try:
         root = resolve_index_root()
     except IndexNotFound:
         pytest.skip("no Claude Desktop index on this machine")
-    records = []
+
+    records, excluded = [], 0
     for d in list_account_dirs(root):
-        for path in glob.glob(os.path.join(d.path, "local_*.json")):
-            try:
-                with open(path, encoding="utf-8-sig") as f:
-                    records.append(json.load(f))
-            except Exception:
-                continue
+        authored = load_manifest(d.path)
+        _existing, app_written = split_records(d.path, authored)
+        records.extend(app_written)
+        excluded += len(authored)
+
+    if excluded:
+        print(
+            f"\n  excluded {excluded} record(s) written by this tool "
+            f"(per .restore-manifest.json)"
+        )
     if not records:
-        pytest.skip("no app-written records on this machine")
+        pytest.skip(
+            f"no app-written records here ({excluded} were written by this tool). "
+            "Start one Code session in the app and re-run."
+        )
+    print(f"  {len(records)} app-written record(s) to check against")
     return records
 
 
@@ -70,7 +91,11 @@ def matched(app_records):
         if parsed and parsed.first_ts:
             pairs.append((record, parsed))
     if len(pairs) < 5:
-        pytest.skip("too few matched sessions to be meaningful")
+        pytest.skip(
+            f"only {len(pairs)} app-written record(s) have a transcript on this "
+            "machine; too few to mean anything"
+        )
+    print(f"  {len(pairs)} session(s) matched to their transcript")
     return pairs
 
 
@@ -174,9 +199,21 @@ def test_completed_turns_is_user_turns_not_assistant_lines(matched):
     if len(with_turns) < 5:
         pytest.skip("too few records carry completedTurns")
 
+    n = len(with_turns)
     exact = sum(1 for r, p in with_turns if p.turns == r["completedTurns"])
     within_one = sum(1 for r, p in with_turns if abs(p.turns - r["completedTurns"]) <= 1)
-    assert exact / len(with_turns) >= 0.50, f"exact {exact}/{len(with_turns)}"
-    assert within_one / len(with_turns) >= 0.65, (
-        f"within +/-1 {within_one}/{len(with_turns)}"
-    )
+
+    # The assistant-line count is the rival hypothesis. Reported alongside so a
+    # failure says which way it failed.
+    print(f"  completedTurns   exact {exact}/{n}  within +/-1 {within_one}/{n}")
+    for record, parsed in with_turns[:5]:
+        print(
+            f"    recorded={record['completedTurns']:<5} derived={parsed.turns:<5} "
+            f"{record.get('title', '')[:40]}"
+        )
+
+    if n < MIN_SAMPLE_FOR_RATES:
+        pytest.skip(f"n={n} is below {MIN_SAMPLE_FOR_RATES}; reported, not asserted")
+
+    assert exact / n >= 0.50, f"exact {exact}/{n}"
+    assert within_one / n >= 0.65, f"within +/-1 {within_one}/{n}"
