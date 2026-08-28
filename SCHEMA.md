@@ -95,6 +95,27 @@ A real record, from a session the app itself created (macOS). Comments added.
 }
 ```
 
+### What has been checked on which platform
+
+Not every claim here has two platforms behind it, and the difference matters.
+The `real` test suite reports its sample size and skips rather than passing
+vacuously, so this table reflects what was actually observed rather than what
+happened to be green:
+
+| Claim | macOS | Windows |
+|---|---|---|
+| Tombstones come in pairs | 78 files / 39 groups | **112 files / 56 groups** |
+| Records carry no BOM | yes | **yes** |
+| Records are minified, no trailing newline | yes | **yes** |
+| `titleSource` ∈ {`auto`, `user`} | yes | **yes** |
+| `enabledMcpTools` ⟹ non-empty `remoteMcpServersConfig` | 43/74 carriers | *no evidence* — no record there carries the field |
+| Derivation hit rates | n=67 | *no evidence* — only 4 app-written records with transcripts |
+| `completedTurns` predicate | n=67 | *no evidence* |
+
+The Windows machine's index is mostly forged records from an older version of
+this tool, which is why so little of it is usable as ground truth. That is a
+property of that machine, not of Windows.
+
 ### Telling an app-written record from a forged one
 
 Useful in two directions: auditing an index whose `.restore-manifest.json` is
@@ -127,7 +148,7 @@ The failure mode in the other direction is a session the app created, never
 re-focused, and happened to stamp with impossible precision. That costs a
 sample rather than corrupting a result.
 
-### The bridge field### The bridge field
+### The bridge field
 
 `cliSessionId` is the only thing tying a picker entry to a conversation. The
 record holds no messages. Lose the field and the entry renders blank or reports
@@ -285,16 +306,31 @@ a pair.
 The `local_*.json` record is removed at the same time; the transcript under
 `~/.claude/projects/` is **not** touched.
 
-The macOS install confirms the mechanism at scale. 78 tombstones across two
-account folders resolve into **39 timestamp groups of exactly two — no
-singletons, no groups of three.** Every payload is 13 bytes, digits only. In
-every pair, exactly one member is a `cliSessionId` with a transcript still on
-disk and the other is the desktop `sessionId`, whose `local_*.json` is gone.
+Confirmed on both platforms, and it is the most thoroughly checked claim here.
+**190 tombstone files resolve into 95 timestamp groups of exactly two — no
+singletons, no groups of three, on either machine.**
+
+| | tombstone files | groups | all pairs? |
+|---|---|---|---|
+| macOS | 78 | 39 | yes |
+| Windows | 112 | 56 | yes |
+
+Every payload is 13 bytes, digits only. In every macOS pair, exactly one member
+is a `cliSessionId` with a transcript still on disk and the other is the desktop
+`sessionId`, whose `local_*.json` is gone.
+
+The Windows count also accounts for something that looked alarming. That index
+holds only 8 records, on a machine where 58 sessions had been restored — a gap
+that could plausibly have been the record-pruning behaviour reported in
+[#63082](https://github.com/anthropics/claude-code/issues/63082). It isn't:
+56 deletions plus 8 survivors is 64, which is the 58 restored plus the handful
+the app created itself. The records were deleted, and the tombstones are the
+receipt.
 
 **Any tool that rebuilds the index must check for `deleted_<cliSessionId>`**
 before writing a record, or it will resurrect every session the user ever
-deleted. On this Mac that is 39 sessions whose transcripts are all still
-present — every one of them would come back.
+deleted. On the macOS machine that is 39 sessions whose transcripts are all
+still present; on the Windows one, 56. Every one of them would come back.
 
 Verified against the four community tools' current sources: none contains a
 match for `deleted_`, `deleted` or `tombstone`.
