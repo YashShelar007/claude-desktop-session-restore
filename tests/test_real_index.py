@@ -205,7 +205,10 @@ def test_records_are_minified_without_trailing_newline(app_records):
 def test_title_source_enum_is_user_or_auto(app_records):
     """ "custom" is a value the app never writes."""
     seen = {r.get("titleSource") for r in app_records if "titleSource" in r}
+    if not seen:
+        pytest.skip(f"no record here carries titleSource (n={len(app_records)})")
     assert seen <= {"user", "auto"}, seen
+    print(f"  titleSource values observed: {sorted(seen)}")
 
 
 def test_title_source_user_always_matches_custom_title(matched):
@@ -221,23 +224,50 @@ def test_title_source_user_always_matches_custom_title(matched):
 
 
 def test_enabled_mcp_tools_implies_remote_mcp_servers(app_records):
-    """The correlation that showed the field was conditional, not dropped."""
-    for record in app_records:
-        if "enabledMcpTools" in record:
-            assert record.get("remoteMcpServersConfig"), record.get("sessionId")
+    """The correlation that showed the field was conditional, not dropped.
+
+    Skips when no record carries the field. The implication is vacuously true
+    then, and treating that as confirmation is precisely how the original
+    "newer builds dropped enabledMcpTools" mistake was made.
+    """
+    carriers = [r for r in app_records if "enabledMcpTools" in r]
+    if not carriers:
+        pytest.skip(
+            f"no record here carries enabledMcpTools (n={len(app_records)}); "
+            "the implication holds vacuously, which is not evidence"
+        )
+    for record in carriers:
+        assert record.get("remoteMcpServersConfig"), record.get("sessionId")
+    print(
+        f"  {len(carriers)}/{len(app_records)} record(s) carry enabledMcpTools, "
+        "all with a non-empty remoteMcpServersConfig"
+    )
 
 
 def test_tombstones_come_in_pairs():
-    """78 tombstones resolved into exactly 39 pairs on the reference machine."""
+    """78 tombstones resolved into exactly 39 pairs on the reference machine.
+
+    Skips rather than passing vacuously when a machine has no tombstones. A
+    green tick that only means "you have never deleted a session" is worse than
+    no result, because it reads as confirmation.
+    """
     root = resolve_index_root()
+    total, groups = 0, 0
     for d in list_account_dirs(root):
         by_timestamp = {}
         for path in glob.glob(os.path.join(d.path, "deleted_*")):
-            value = open(path, encoding="utf-8", errors="replace").read().strip()
+            with open(path, encoding="utf-8", errors="replace") as f:
+                value = f.read().strip()
             by_timestamp.setdefault(value, []).append(path)
+        total += sum(len(g) for g in by_timestamp.values())
+        groups += len(by_timestamp)
         for value, group in by_timestamp.items():
             assert value.isdigit(), value
             assert len(group) == 2, (value, group)
+
+    if not total:
+        pytest.skip("no tombstones on this machine; nothing to confirm")
+    print(f"  {total} tombstone(s) in {groups} group(s), all pairs")
 
 
 def test_structural_core_excludes_conditional_fields(app_records):
