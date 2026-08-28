@@ -279,17 +279,28 @@ nothing and suggests the app has never run.
 ## How the derivations were checked
 
 Every field is derived from the transcript and compared against the record the
-app wrote for the *same* session. 62 macOS sessions could be matched:
+app wrote for the *same* session. Reproduce it on your own machine — it writes
+nothing:
+
+```bash
+pytest -m real -s
+```
+
+On the reference macOS machine, 67 sessions matched:
 
 | Field | Agrees with the app's own record |
 |---|---|
-| `createdAt` | 62/62 within 60 s (median +2.0 s — the app stamps at session creation, before the first message) |
-| `originCwd` | 59/62 |
-| `cwd` | 56/62 |
-| `title` | 56/62 |
+| `createdAt` | 67/67 within 60 s (median +2.0 s — the app stamps at session creation, before the first message) |
+| `originCwd` | 63/67 |
+| `title` | 61/67 |
+| `cwd` | 60/67 |
+| `completedTurns` | 46/67 exact, 56/67 within ±1 |
 | `lastActivityAt` | 52/62 within 60 s (the rest are transcripts that kept growing after the app stopped tracking) |
-| `completedTurns` | 42/61 exact, 50/61 within ±1 |
 | `titleSource` | 29/59 |
+
+The first five are what `pytest -m real` prints. The last two were measured by
+hand on a slightly smaller corpus and are not yet reproduced by a test, which by
+this repo's own standard makes them the weakest rows in the table.
 
 Two of these deserve a note.
 

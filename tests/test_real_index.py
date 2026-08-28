@@ -38,6 +38,27 @@ PROJECTS = os.path.join(os.path.expanduser("~"), ".claude", "projects")
 MIN_SAMPLE_FOR_RATES = 20
 
 
+def looks_app_written(record: dict) -> bool:
+    """Did the app write this record, or did a tool like this one forge it?
+
+    The manifest (``.restore-manifest.json``) is the designed answer, but it is
+    not always present -- a machine can carry records from an older version of
+    this tool, or from one of the other tools in this space, with no manifest at
+    all. On such a machine the real suite would grade this tool's derivations
+    against its own stale output, which is both circular and guaranteed to fail.
+
+    So there is a second, structural signal. The app re-stamps ``lastFocusedAt``
+    every time the window regains focus; a tool forging a record has nothing to
+    re-stamp and sets it equal to ``lastActivityAt``. Across 74 known
+    app-written records, **zero** have them equal.
+
+    A session the app created and never re-focused could in principle look
+    forged. That costs us a sample, which is the safe direction to be wrong in.
+    """
+    focused, active = record.get("lastFocusedAt"), record.get("lastActivityAt")
+    return not (focused is not None and focused == active)
+
+
 @pytest.fixture(scope="module")
 def app_records():
     """Records the *app* wrote. Records this tool wrote are excluded.
@@ -53,22 +74,26 @@ def app_records():
     except IndexNotFound:
         pytest.skip("no Claude Desktop index on this machine")
 
-    records, excluded = [], 0
+    records, by_manifest, by_signal = [], 0, 0
     for d in list_account_dirs(root):
         authored = load_manifest(d.path)
-        _existing, app_written = split_records(d.path, authored)
-        records.extend(app_written)
-        excluded += len(authored)
+        _existing, not_in_manifest = split_records(d.path, authored)
+        by_manifest += len(authored)
+        for record in not_in_manifest:
+            if looks_app_written(record):
+                records.append(record)
+            else:
+                by_signal += 1
 
-    if excluded:
+    if by_manifest or by_signal:
         print(
-            f"\n  excluded {excluded} record(s) written by this tool "
-            f"(per .restore-manifest.json)"
+            f"\n  excluded {by_manifest + by_signal} forged record(s): "
+            f"{by_manifest} by manifest, {by_signal} by lastFocusedAt signal"
         )
     if not records:
         pytest.skip(
-            f"no app-written records here ({excluded} were written by this tool). "
-            "Start one Code session in the app and re-run."
+            f"no app-written records here ({by_manifest + by_signal} look forged). "
+            "Start one Code session in the app, let it finish, and re-run."
         )
     print(f"  {len(records)} app-written record(s) to check against")
     return records
@@ -168,25 +193,39 @@ def test_structural_core_excludes_conditional_fields(app_records):
 def test_derivation_hit_rates(matched):
     """Reproduces the README's validation table.
 
-    Thresholds are set below the measured rates, not at them -- this is a
-    regression guard, not a claim that the numbers are laws.
+    Always prints the rates -- that is the useful output, and it is what someone
+    reporting a new platform should paste. Only *asserts* them once the sample
+    is big enough for a rate to mean anything. This repo asks contributors to
+    carry n with every claim; its own tests should hold to that rather than
+    turning n=8 into a verdict.
     """
-    hits, total = _rate(matched, lambda r, p: p.cwd == r.get("cwd"))
-    assert hits / total >= 0.80, f"cwd {hits}/{total}"
-
-    hits, total = _rate(matched, lambda r, p: p.origin_cwd == r.get("originCwd"))
-    assert hits / total >= 0.85, f"originCwd {hits}/{total}"
-
-    hits, total = _rate(matched, lambda r, p: session_title(p)[0] == r.get("title"))
-    assert hits / total >= 0.80, f"title {hits}/{total}"
-
-    hits, total = _rate(
-        matched,
-        lambda r, p: (
-            abs((to_epoch_ms(p.first_ts) or 0) - r.get("createdAt", 0)) <= 60_000
+    checks = [
+        ("cwd", 0.80, lambda r, p: p.cwd == r.get("cwd")),
+        ("originCwd", 0.85, lambda r, p: p.origin_cwd == r.get("originCwd")),
+        ("title", 0.80, lambda r, p: session_title(p)[0] == r.get("title")),
+        (
+            "createdAt (60s)",
+            0.95,
+            lambda r, p: (
+                abs((to_epoch_ms(p.first_ts) or 0) - r.get("createdAt", 0)) <= 60_000
+            ),
         ),
-    )
-    assert hits / total >= 0.95, f"createdAt {hits}/{total}"
+    ]
+
+    results = []
+    for name, floor, predicate in checks:
+        hits, total = _rate(matched, predicate)
+        results.append((name, hits, total, floor))
+        print(f"  {name:<16} {hits:>4}/{total:<4} ({hits / total:.0%})")
+
+    if len(matched) < MIN_SAMPLE_FOR_RATES:
+        pytest.skip(
+            f"n={len(matched)} is below {MIN_SAMPLE_FOR_RATES}; "
+            "rates reported, not asserted"
+        )
+
+    for name, hits, total, floor in results:
+        assert hits / total >= floor, f"{name} {hits}/{total}"
 
 
 def test_completed_turns_is_user_turns_not_assistant_lines(matched):

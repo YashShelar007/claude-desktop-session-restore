@@ -95,6 +95,29 @@ A real record, from a session the app itself created (macOS). Comments added.
 }
 ```
 
+### `lastFocusedAt` tells you who wrote the record
+
+The app re-stamps `lastFocusedAt` every time the window regains focus, so it
+drifts away from `lastActivityAt` as soon as a session is opened again. Across
+74 app-written records, **zero** have the two exactly equal.
+
+A tool forging a record has nothing to re-stamp, so it sets both to the
+transcript's last timestamp. That makes the pair a reliable provenance signal:
+
+| | `lastFocusedAt == lastActivityAt` |
+|---|---|
+| app-written (n=74) | 0 |
+| forged by this tool and its predecessors | all |
+
+Useful in two directions. It is how the test suite avoids grading derivations
+against records this tool wrote earlier — which it was doing, and which produced
+confident, meaningless failures on a machine carrying old forged records. And it
+is a way to audit an index whose `.restore-manifest.json` is missing or was
+written by a different tool.
+
+The caveat is a session the app created and never re-focused, which would look
+forged. That costs a sample rather than corrupting a result.
+
 ### The bridge field
 
 `cliSessionId` is the only thing tying a picker entry to a conversation. The
