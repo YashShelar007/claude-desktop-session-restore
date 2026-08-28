@@ -15,6 +15,7 @@ Nothing here writes anything.
 from __future__ import annotations
 
 import glob
+import json
 import os
 
 import pytest
@@ -38,25 +39,72 @@ PROJECTS = os.path.join(os.path.expanduser("~"), ".claude", "projects")
 MIN_SAMPLE_FOR_RATES = 20
 
 
-def looks_app_written(record: dict) -> bool:
-    """Did the app write this record, or did a tool like this one forge it?
+def _global_bounds(path: str) -> tuple[str | None, str | None]:
+    """First and last timestamp in a transcript, ignoring session scoping.
 
-    The manifest (``.restore-manifest.json``) is the designed answer, but it is
-    not always present -- a machine can carry records from an older version of
-    this tool, or from one of the other tools in this space, with no manifest at
-    all. On such a machine the real suite would grade this tool's derivations
-    against its own stale output, which is both circular and guaranteed to fail.
-
-    So there is a second, structural signal. The app re-stamps ``lastFocusedAt``
-    every time the window regains focus; a tool forging a record has nothing to
-    re-stamp and sets it equal to ``lastActivityAt``. Across 74 known
-    app-written records, **zero** have them equal.
-
-    A session the app created and never re-focused could in principle look
-    forged. That costs us a sample, which is the safe direction to be wrong in.
+    Deliberately *not* the session-scoped values ``read_transcript`` returns:
+    forging tools take the global ones, so that is what a forged record's
+    timestamps will match.
     """
+    first = last = None
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                continue
+            ts = obj.get("timestamp")
+            if ts:
+                if first is None:
+                    first = ts
+                last = ts
+    return first, last
+
+
+def forgery_signals(record: dict, transcript: str | None = None) -> list[str]:
+    """Names of the signals saying this record was forged, not written by the app.
+
+    The manifest (``.restore-manifest.json``) is the designed answer and is
+    checked first, but it is not reliable: a machine can carry records from an
+    older version of this tool, or from one of the other tools in this space,
+    with no manifest entry at all. On such a machine the real suite would grade
+    this tool's derivations against its own stale output -- circular, and
+    guaranteed to fail. That is exactly what happened on the Windows machine
+    this was written for.
+
+    So there are three structural signals. Each was checked against 67-74 known
+    app-written records and fired on **none** of them:
+
+    - ``lastFocusedAt == lastActivityAt``. The app re-stamps ``lastFocusedAt``
+      whenever the window regains focus; a forging tool has nothing to re-stamp.
+      Weakest of the three, because opening a forged session in the app clears
+      it -- which is why the other two exist.
+    - ``createdAt`` exactly equal to the transcript's first timestamp. The app
+      stamps at session creation, ~1.8 s before the first message, and never
+      re-stamps. Across 67 records the delta never came within 50 ms of zero.
+    - ``lastActivityAt`` exactly equal to the transcript's last timestamp.
+
+    A session the app created, never re-focused, and stamped with impossible
+    precision could in principle look forged. That costs a sample, which is the
+    safe direction to be wrong in.
+    """
+    fired = []
+
     focused, active = record.get("lastFocusedAt"), record.get("lastActivityAt")
-    return not (focused is not None and focused == active)
+    if focused is not None and focused == active:
+        fired.append("lastFocusedAt==lastActivityAt")
+
+    if transcript:
+        first, last = _global_bounds(transcript)
+        if first is not None and record.get("createdAt") == to_epoch_ms(first):
+            fired.append("createdAt==first timestamp")
+        if last is not None and active is not None and active == to_epoch_ms(last):
+            fired.append("lastActivityAt==last timestamp")
+
+    return fired
 
 
 @pytest.fixture(scope="module")
@@ -80,10 +128,10 @@ def app_records():
         _existing, not_in_manifest = split_records(d.path, authored)
         by_manifest += len(authored)
         for record in not_in_manifest:
-            if looks_app_written(record):
-                records.append(record)
-            else:
+            if forgery_signals(record):
                 by_signal += 1
+            else:
+                records.append(record)
 
     if by_manifest or by_signal:
         print(
@@ -107,10 +155,21 @@ def matched(app_records):
     by_stem = {
         os.path.splitext(os.path.basename(p))[0]: p for p in find_transcripts(PROJECTS)
     }
-    pairs = []
+    pairs, forged = [], 0
     for record in app_records:
         path = by_stem.get(record.get("cliSessionId"))
         if not path:
+            continue
+        # The transcript-dependent forgery signals can only run here, where the
+        # transcript is in hand. A record that survived the cheap check in
+        # app_records can still fail these.
+        signals = forgery_signals(record, path)
+        if signals:
+            forged += 1
+            print(
+                f"  forged, excluded: {record.get('title', '')[:44]!r} "
+                f"({', '.join(signals)})"
+            )
             continue
         parsed = read_transcript(path, record["cliSessionId"])
         if parsed and parsed.first_ts:

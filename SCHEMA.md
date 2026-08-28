@@ -95,30 +95,39 @@ A real record, from a session the app itself created (macOS). Comments added.
 }
 ```
 
-### `lastFocusedAt` tells you who wrote the record
+### Telling an app-written record from a forged one
 
-The app re-stamps `lastFocusedAt` every time the window regains focus, so it
-drifts away from `lastActivityAt` as soon as a session is opened again. Across
-74 app-written records, **zero** have the two exactly equal.
+Useful in two directions: auditing an index whose `.restore-manifest.json` is
+missing or came from another tool, and stopping this project's own test suite
+from grading its derivations against records it wrote earlier. It was doing
+exactly that, and producing confident, meaningless failures.
 
-A tool forging a record has nothing to re-stamp, so it sets both to the
-transcript's last timestamp. That makes the pair a reliable provenance signal:
+Three signals. Each was checked against every known app-written record on the
+reference machine and fired on **none** of them:
 
-| | `lastFocusedAt == lastActivityAt` |
-|---|---|
-| app-written (n=74) | 0 |
-| forged by this tool and its predecessors | all |
+| Signal | App-written | Why |
+|---|---|---|
+| `lastFocusedAt == lastActivityAt` | 0/74 | the app re-stamps `lastFocusedAt` on window focus; a forging tool has nothing to re-stamp |
+| `createdAt` == transcript's first timestamp, exactly | 0/67 | the app stamps at session creation, ~1.8 s *before* the first message |
+| `lastActivityAt` == transcript's last timestamp, exactly | 0/67 | same shape — the app's value is its own, not the file's |
 
-Useful in two directions. It is how the test suite avoids grading derivations
-against records this tool wrote earlier — which it was doing, and which produced
-confident, meaningless failures on a machine carrying old forged records. And it
-is a way to audit an index whose `.restore-manifest.json` is missing or was
-written by a different tool.
+The `createdAt` margin is not marginal: across 67 records the delta never came
+within 50 ms of zero (median +1.8 s, quartiles +1.1 s and +2.6 s). A forging
+tool copies the timestamp straight out of the transcript, so it lands on zero
+exactly.
 
-The caveat is a session the app created and never re-focused, which would look
-forged. That costs a sample rather than corrupting a result.
+The first signal is the weakest, and the reason the other two exist. **Opening a
+forged session in the app clears it** — the app re-stamps `lastFocusedAt` on
+focus, so a record that was forged and then opened looks app-written by that
+test alone. On a machine where 58 sessions had been restored and then opened to
+verify them, it caught 1 of 8. The timestamp signals catch the rest, because
+`createdAt` is never re-stamped.
 
-### The bridge field
+The failure mode in the other direction is a session the app created, never
+re-focused, and happened to stamp with impossible precision. That costs a
+sample rather than corrupting a result.
+
+### The bridge field### The bridge field
 
 `cliSessionId` is the only thing tying a picker entry to a conversation. The
 record holds no messages. Lose the field and the entry renders blank or reports
