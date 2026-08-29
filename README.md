@@ -138,27 +138,29 @@ cd claude-desktop-session-restore
 python3 restore_desktop_sessions.py
 ```
 
-Or install it:
+Or install it from a checkout:
 
 ```bash
-pipx install claude-desktop-session-restore
-restore-desktop-sessions
+pipx install .          # then: restore-desktop-sessions
 ```
+
+(Not on PyPI yet — `pipx install claude-desktop-session-restore` will work from
+the first tagged release. Until then use a checkout.)
 
 Either way, the first run writes nothing:
 
 ```bash
 # Dry run - report what would be indexed, write nothing
-restore-desktop-sessions
+python3 restore_desktop_sessions.py
 
 # Cautious first pass: 5 most recent
-restore-desktop-sessions --limit 5 --apply
+python3 restore_desktop_sessions.py --limit 5 --apply
 
 # ...confirm they open with real history, then do the rest
-restore-desktop-sessions --apply
+python3 restore_desktop_sessions.py --apply
 
 # After a migration where only some paths exist on this machine
-restore-desktop-sessions --cwd-prefix /Users/you/repos --apply
+python3 restore_desktop_sessions.py --cwd-prefix /Users/you/repos --apply
 ```
 
 **PowerShell 5.1+** (ships with Windows):
