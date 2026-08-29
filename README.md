@@ -6,7 +6,7 @@ hardcoding an undocumented schema.
 Claude Desktop lists Code sessions from small pointer records it keeps at:
 
 ```
-<index-root>/<orgUuid>/<accountUuid>/local_<uuid>.json
+<index-root>/<accountUuid>/<orgUuid>/local_<uuid>.json
 ```
 
 Each record points at a CLI transcript through its `cliSessionId` field — the
@@ -49,28 +49,52 @@ and does not help with a bulk migration.
 
 ## What this one adds
 
-Four things the tools above don't do, each found by observing a live install:
+Four things the tools above don't do, each found by observing live installs —
+one Windows, one macOS with 69 app-written records to check against.
 
-**1. It refuses to invent a schema.**
-Every other tool hardcodes a field list, and that list goes stale — sahol3's
-README warns the format "may change between app versions," and it has. The
-schema in #58670 carries `enabledMcpTools`, which the build tested here does not
-write at all; that build instead writes `reportFindingsCard`,
-`lastSpawnRootDetected`, `remoteControlAutoEligible` and `spawnSeed`, none of
-which appear in #58670.
+**1. It refuses to invent a schema, because there isn't one.**
+Every other tool hardcodes a field list. The 69 macOS records carry **44
+distinct fields in 44 distinct field-set signatures**, from 19 to 33 fields per
+record. There is no single correct list, because the field set is *conditional
+on what the session did*: `worktreeName`/`worktreePath` only for worktree
+sessions, the `pr*` family only where a PR was opened, `enabledMcpTools` only
+where remote MCP servers were configured (43/43 records that have it have a
+non-empty `remoteMcpServersConfig`; none of the 5 with an empty one do).
 
-So this tool reads a record **the app itself wrote on this machine**, clones it,
-and overrides only the ten fields it can derive. Unknown fields — including ones
-added by a future update — are carried through verbatim. If no app-written
-record exists it stops and tells you to create one, rather than guessing.
+That also kills the version-drift story this README used to tell. Every field
+ever reported for this record — all of #58670's, all of the Windows build's — is
+present on macOS. Nothing was removed by an update; different sessions get
+different fields.
+
+Cloning the richest live record, which is what this tool used to do, is worse
+than hardcoding. The richest record on the macOS machine would stamp all 60
+restored sessions with `prNumber: 109`, someone else's worktree path, a stale
+`promptSuggestion` and 1 KB of MCP tool grants — and if the chosen record
+carried `transcriptUnavailable: true` (5 do), every restored session would be
+marked broken on arrival.
+
+So this tool reads **every record the app wrote on this machine**, keeps the
+fields present in ≥90% of them, and takes values from the most recent. On the
+macOS machine that threshold lands in a natural gap (63/69 → 43/69) and yields
+a 20-field structural core. With only one app-written record it degenerates to
+"every field in that record" — the old behaviour — so it is never worse and gets
+better as the app writes more. If no app-written record exists it stops and
+tells you to create one, rather than guessing.
 
 **2. It honours deletion tombstones.**
 Deleting a session in the UI leaves a *pair* of files in the index folder,
 `deleted_<desktop sessionId>` and `deleted_<cliSessionId>`, each containing only
-a deletion timestamp in epoch milliseconds. No other tool appears to know these
-exist — which means re-running one resurrects every session you have ever
-deleted. Verified here: 10 sessions deleted through the UI were queued for
-recreation until tombstone handling was added.
+a deletion timestamp in epoch milliseconds.
+
+**None of the four tools listed above looks for them** — no match for
+`deleted_`, `deleted` or `tombstone` in any of their sources, checked against
+current `HEAD`. Each skips only sessions whose `local_*.json` is currently
+present, but deletion removes that file and leaves the transcript, so a deleted
+session is indistinguishable from a never-indexed one. Re-running any of them
+after deleting sessions in the UI brings them all back. The macOS machine confirms the mechanism at scale: **78 tombstones
+resolve into exactly 39 timestamp pairs, no singletons, no groups of three**,
+and a run without tombstone handling would bring back all 39 deleted sessions,
+whose transcripts are all still on disk.
 
 **3. It filters what a session actually is.**
 `~/.claude/projects/` holds far more than sessions. On the machine this was
@@ -84,8 +108,13 @@ still being written by a live session.
 **4. It gets titles and encoding right.**
 Titles prefer the user's own `custom-title` over the model's `ai-title` over the
 first real user message, skipping harness scaffolding (`<command-name>`, caveat
-blocks). 53 of 60 transcripts tested carried a `custom-title` — exactly what the
-official `/desktop` import throws away.
+blocks). 53 of 60 transcripts on Windows and **95 of 113 on macOS** carried a
+`custom-title` — exactly what the official `/desktop` import throws away.
+
+`titleSource` takes the app's own enum, `"user"` or `"auto"`. All 24 macOS
+records with `titleSource: "user"` have a title byte-identical to their
+transcript's `custom-title`. (This tool used to write `"custom"`, a value the
+app never produces.)
 
 On encoding, two separate traps: a UTF-8 **BOM** makes the app's JSON parser
 reject the record outright, and PowerShell 5.1's `Get-Content` defaults to the
@@ -94,8 +123,47 @@ tool reads and writes UTF-8 explicitly at both ends.
 
 ## Usage
 
-Requires PowerShell 5.1+ (ships with Windows). Claude Desktop must have run at
-least once and created one Code session, so there is a record to model on.
+Two implementations, same behaviour and same flags. Claude Desktop must have run
+at least once and created one Code session, so there is a record to model on.
+
+**Python 3.9+, no dependencies** — no PowerShell needed on macOS or Linux.
+
+Zero install, which matters when your history has just vanished and you would
+rather not set up a virtualenv first. Any Python 3.9+ works, including macOS's
+own `/usr/bin/python3`:
+
+```bash
+git clone https://github.com/YashShelar007/claude-desktop-session-restore
+cd claude-desktop-session-restore
+python3 restore_desktop_sessions.py
+```
+
+Or install it from a checkout:
+
+```bash
+pipx install .          # then: restore-desktop-sessions
+```
+
+(Not on PyPI yet — `pipx install claude-desktop-session-restore` will work from
+the first tagged release. Until then use a checkout.)
+
+Either way, the first run writes nothing:
+
+```bash
+# Dry run - report what would be indexed, write nothing
+python3 restore_desktop_sessions.py
+
+# Cautious first pass: 5 most recent
+python3 restore_desktop_sessions.py --limit 5 --apply
+
+# ...confirm they open with real history, then do the rest
+python3 restore_desktop_sessions.py --apply
+
+# After a migration where only some paths exist on this machine
+python3 restore_desktop_sessions.py --cwd-prefix /Users/you/repos --apply
+```
+
+**PowerShell 5.1+** (ships with Windows):
 
 ```powershell
 # Dry run - report what would be indexed, write nothing
@@ -119,7 +187,26 @@ least once and created one Code session, so there is a record to model on.
 | `-IncludeDeleted` | Re-index tombstoned sessions. Off by default. |
 | `-MinIdleMinutes N` | Skip transcripts touched in the last N minutes (default 2). |
 | `-IndexDir` / `-ProjectsRoot` | Override auto-detection. |
+| `-CoreThreshold F` | Keep fields present in ≥F of app-written records (default 0.9). |
+| `-Account UUID` | Write into this account's folder instead of the one with the most records. |
 | `-NoBackup` | Skip the pre-write backup. Not recommended. |
+
+The Python flags are the same names in lower kebab-case: `--apply`, `--limit`,
+`--cwd-prefix`, `--include-deleted`, `--min-idle-minutes`, `--index-dir`,
+`--projects-root`, `--core-threshold`, `--account`, `--no-backup`.
+
+### Accounts
+
+The index is partitioned by account, and records are only visible to the account
+whose folder they are in. Both scripts read the two signals that reveal a
+mismatch and warn before writing:
+
+- `~/.claude.json` → `oauthAccount.accountUuid` — who authored the transcripts,
+  and therefore who owns any artifacts those sessions published
+- `config.json` → `lastKnownAccountUuid` — which account the picker is showing
+
+If the target folder disagrees with either, you get a warning explaining which
+symptom to expect. Use `--account` / `-Account` to target a specific one.
 
 Every run with `-Apply` copies the whole index to
 `claude-code-sessions_backup_<timestamp>` alongside it first, and prints the
@@ -142,25 +229,126 @@ nothing and suggests the app has never run.
 
 ## Caveats
 
-- **The format is undocumented and unstable.** Reverse-engineered by observation
-  against Claude Desktop `1.37937.3` / bundled claude-code `2.1.246`. It can
-  change in any update. That's the reason for the clone-a-live-record design,
-  but it isn't a guarantee.
+- **The format is undocumented.** Reverse-engineered by observation against
+  Claude Desktop `1.37937.3` / bundled claude-code `2.1.246`, on a Windows Store
+  build and on macOS. It can change in any update. The structural-core design is
+  a hedge against that, not a guarantee.
+- **The PowerShell and Python paths are not equally tested.** The Python
+  implementation has 105 tests, CI on Linux/macOS/Windows, and was validated
+  against 62 app-written macOS records (see below). The PowerShell script
+  carries the same corrections but has not been re-run since — there was no
+  PowerShell on the machine the fixes were made on. If you are on Windows,
+  running it once and reporting back is the single most useful thing you could
+  contribute.
 - **Artifacts won't follow across accounts.** Artifacts are server-side and
   keyed to the account that published them. Sessions migrated from a machine
   signed into a different account will show their artifacts as unavailable, and
   nothing on disk can change that. Conversation history is unaffected.
+
+  Confirmed from both ends, not inferred. On the source machine the sessions,
+  transcripts and all 26 referenced artifact UUIDs belong to account **A**
+  (`~/.claude.json` → `oauthAccount`). The destination machine's Desktop is
+  signed in as account **B** (`config.json` → `lastKnownAccountUuid`), and its
+  index contains exactly one account folder — B's. So all restored records live
+  under an account that never authored those sessions. History restores because
+  it is read from the local transcript; artifacts don't because they are
+  resolved server-side against the signed-in account.
+
+  This leaves a choice rather than a bug, and it is worth knowing before you
+  run anything:
+
+  | Signed in as | Sessions in the picker | Artifacts |
+  |---|---|---|
+  | B (where the records were written) | yes | unavailable |
+  | A (which owns the artifacts) | no — wrong account folder | resolve |
+
+  To get both, restore into A's folder with `--account A` while signed in as A.
+  Both scripts now detect and warn about each half of this.
 - **Some builds prune records.**
   [#63082](https://github.com/anthropics/claude-code/issues/63082) reports a
   startup scanner in Desktop 2.1.144–2.1.145 stripping `cliSessionId` and
-  inserting `transcriptUnavailable: true` on every launch. Not observed on the
-  build tested here.
+  inserting `transcriptUnavailable: true` on every launch. The destructive part
+  is not observed here: 5 macOS records carry `transcriptUnavailable: true` and
+  all 5 keep their `cliSessionId`, and in all 5 the transcript really is gone
+  from disk. The flag is accurate bookkeeping on this build — but it is exactly
+  the kind of field a tool must not inherit when cloning.
+- **`completedTurns` is approximate.** It is a counter the app maintains at
+  runtime, not a pure function of the transcript, so it cannot be reconstructed
+  exactly. The derivation here matches 42 of 61 records exactly and 50 within
+  ±1. It is cosmetic.
 - Unofficial and unaffiliated with Anthropic.
+
+## How the derivations were checked
+
+Every field is derived from the transcript and compared against the record the
+app wrote for the *same* session. Reproduce it on your own machine — it writes
+nothing:
+
+```bash
+pytest -m real -s
+```
+
+On the reference macOS machine, 67 sessions matched:
+
+| Field | Agrees with the app's own record |
+|---|---|
+| `createdAt` | 67/67 within 60 s (median +2.0 s — the app stamps at session creation, before the first message) |
+| `originCwd` | 63/67 |
+| `title` | 61/67 |
+| `cwd` | 60/67 |
+| `completedTurns` | 46/67 exact, 56/67 within ±1 |
+| `lastActivityAt` | 52/62 within 60 s (the rest are transcripts that kept growing after the app stopped tracking) |
+| `titleSource` | 29/59 |
+
+The first five are what `pytest -m real` prints. The last two were measured by
+hand on a slightly smaller corpus and are not yet reproduced by a test, which by
+this repo's own standard makes them the weakest rows in the table.
+
+Two of these deserve a note.
+
+`titleSource` disagrees on 30 records where the app says `"auto"` but the
+transcript has a `custom-title`. That is not a derivation bug — it is the app
+failing to re-read a title the user set later from the CLI, which is
+[#83051](https://github.com/anthropics/claude-code/issues/83051) seen from the
+other side. For a session the app never indexed, `custom-title` is the right
+answer.
+
+`originCwd` was the single worst bug found: the tool used to set it equal to
+`cwd`, which is correct for 30 of 69 records and wrong for the 39 worktree
+sessions where the app records the repo root. Deriving it from the
+`.claude/worktrees/<name>` path segment took it from 23/62 to 59/62.
+
+## Project layout
+
+```
+src/claude_desktop_restore/
+  paths.py         index discovery, account/org resolution, account signals
+  transcripts.py   reading .jsonl, deriving title/cwd/timestamps/turns
+  records.py       the structural core, and assembling one record
+  index.py         everything that touches disk: tombstones, backup, writes
+  cli.py           argument parsing, selection, output
+tests/             105 tests against fixtures, plus a `real` suite (see below)
+scripts/
+  check_invariants.py   the safety rules, enforced rather than documented
+Restore-DesktopSessions.ps1   the Windows/PowerShell implementation
+```
+
+`index.py` is deliberately the only module that writes anything, so the rules
+that must never break are checkable in one place.
+
+Tests marked `real` read this machine's actual index and transcripts and
+reproduce the validation table below. They write nothing:
+
+```bash
+pytest -m real
+```
 
 ## See also
 
-- [SCHEMA.md](SCHEMA.md) — the record format, field by field, with version notes
+- [SCHEMA.md](SCHEMA.md) — the record format, field by field, with the macOS/Windows/#58670 comparison
 - [PROPOSAL.md](PROPOSAL.md) — a proposed upstream fix
+- [CONTRIBUTING.md](CONTRIBUTING.md) — the claim standard, and what's most wanted
+- [ROADMAP.md](ROADMAP.md) — what's next, and what will never be built
 
 ## License
 

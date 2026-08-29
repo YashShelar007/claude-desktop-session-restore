@@ -1,2 +1,24 @@
+# Index backups. These are copies of your real session index and contain your
+# project paths and session titles. Never commit them.
+claude-code-sessions_backup_*/
 *.bak
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# macOS
+.DS_Store
+
 scratch/
+
+# Unposted issue-comment drafts. Working documents, not repo content.
+drafts/

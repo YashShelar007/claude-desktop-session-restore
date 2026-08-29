@@ -4,7 +4,7 @@
 
 .DESCRIPTION
   Claude Desktop lists Code sessions from per-session pointer records at
-      <index-root>/<orgUuid>/<accountUuid>/local_<uuid>.json
+      <index-root>/<accountUuid>/<orgUuid>/local_<uuid>.json
   Each record points at a CLI transcript through its "cliSessionId" field. The
   app only writes records for sessions IT creates, so CLI sessions -- and any
   session tree migrated from another machine -- stay invisible in the picker
@@ -12,10 +12,14 @@
 
   This script regenerates the missing records.
 
-  Unlike other tools in this space it does NOT hardcode the record schema. It
-  clones a record the app itself wrote on THIS machine and overrides only the
-  fields it can derive, so fields added by an app update are carried through
-  verbatim instead of being silently dropped.
+  Unlike other tools in this space it does NOT hardcode the record schema. The
+  record's field set is conditional on what a session did -- worktree fields
+  only for worktree sessions, pr* only where a PR was opened, enabledMcpTools
+  only where remote MCP servers were configured -- so no single record is a
+  valid template. This reads every record the app wrote on THIS machine, keeps
+  the fields present in nearly all of them (the structural core), and takes
+  values from the most recent one. Fields added by an app update are carried
+  through automatically; per-session state is left behind.
 
 .PARAMETER Apply
   Actually write records. Without it the script runs read-only (dry run).
@@ -29,7 +33,11 @@
 
 .PARAMETER IndexDir
   Override index auto-detection. Point at the folder CONTAINING the
-  <orgUuid>/<accountUuid> pair.
+  <accountUuid>/<orgUuid> pair.
+
+.PARAMETER Account
+  Write into this account's folder instead of the one with the most records.
+  Records only appear in the picker for the account the app is signed in as.
 
 .PARAMETER ProjectsRoot
   Override the transcript root (default: ~/.claude/projects).
@@ -65,9 +73,11 @@ param(
   [string] $CwdPrefix,
   [int]    $Limit = 0,
   [string] $IndexDir,
+  [string] $Account,
   [string] $ProjectsRoot,
   [switch] $IncludeDeleted,
   [int]    $MinIdleMinutes = 2,
+  [double] $CoreThreshold = 0.9,
   [switch] $NoBackup
 )
 
@@ -76,12 +86,27 @@ $ErrorActionPreference = 'Stop'
 # No BOM: the app's JSON parser rejects one outright.
 $UTF8 = New-Object System.Text.UTF8Encoding($false)
 
-# Fields derived per session. Everything else is inherited from the reference
-# record -- that inheritance is what makes this survive app updates.
+# Fields derived per session. Everything else is inherited from the structural
+# core -- that inheritance is what makes this survive app updates.
 $DerivedFields = @(
   'sessionId', 'cliSessionId', 'cwd', 'originCwd',
   'createdAt', 'lastActivityAt', 'lastFocusedAt',
   'title', 'titleSource', 'completedTurns'
+)
+
+# Fields that are dangerous rather than merely wrong to inherit. The presence
+# threshold already excludes these on a machine with many app-written records;
+# this is the backstop for a machine that has only one, where conditionality is
+# invisible. transcriptUnavailable is the worst of them: inherit it and every
+# restored session is marked broken on arrival.
+$NeverInherit = @(
+  'transcriptUnavailable', 'error', 'errorAt',
+  'forkedFromSessionId', 'spawnedFrom', 'dispatchParentOrigin',
+  'prNumber', 'prUrl', 'prRepository', 'prState', 'prs',
+  'branch', 'sourceBranch', 'writtenBranches',
+  'worktreeName', 'worktreePath',
+  'promptSuggestion', 'chromeTabGroupId', 'color',
+  'enabledMcpTools'
 )
 
 # Per-session runtime state that must NOT be inherited. Reset only if the
@@ -137,41 +162,106 @@ function Resolve-IndexRoot {
   return $found[0]
 }
 
-function Resolve-AccountDir {
+function Get-AccountSignals {
+  # Which account authored the transcripts, and which one is the app showing?
+  # Two different questions, two different files, and they can disagree --
+  # which is exactly the confusing case this warns about.
   param([string]$IndexRoot)
 
-  # Layout: <root>/<orgUuid>/<accountUuid>/local_*.json
+  $cliAccount = $null; $appAccount = $null
+  $claudeJson = Join-Path $HOME '.claude.json'
+  if (Test-Path $claudeJson) {
+    try {
+      $oa = (Get-Content $claudeJson -Raw -Encoding UTF8 | ConvertFrom-Json).oauthAccount
+      if ($oa) { $cliAccount = $oa.accountUuid }
+    } catch { }
+  }
+  $cfg = Join-Path (Split-Path $IndexRoot -Parent) 'config.json'
+  if (Test-Path $cfg) {
+    try { $appAccount = (Get-Content $cfg -Raw -Encoding UTF8 | ConvertFrom-Json).lastKnownAccountUuid } catch { }
+  }
+  [pscustomobject]@{ CliAccount = $cliAccount; AppAccount = $appAccount }
+}
+
+function Write-AccountMismatch {
+  # Two failure modes that look like bugs but are account scoping.
+  param([string]$Account, $Signals)
+
+  if ($Signals.AppAccount -and $Signals.AppAccount -ne $Account) {
+    Write-Warn 'The Desktop app is signed in as a DIFFERENT account:'
+    Write-Host "      writing into : $Account"
+    Write-Host "      app shows    : $($Signals.AppAccount)"
+    Write-Host '      Records written here are correct but will not appear in the'
+    Write-Host '      picker until you sign in as the first account. Use -Account'
+    Write-Host '      to target the signed-in one instead.'
+  }
+  if ($Signals.CliAccount -and $Signals.CliAccount -ne $Account) {
+    Write-Warn 'The transcripts were authored by a DIFFERENT account:'
+    Write-Host "      writing into : $Account"
+    Write-Host "      authored by  : $($Signals.CliAccount)"
+    Write-Host '      Conversation history will restore in full -- it is read from'
+    Write-Host '      the local transcript. Artifacts published in these sessions'
+    Write-Host '      are server-side and account-scoped, so they will show as'
+    Write-Host '      unavailable. Nothing on disk can change that.'
+  }
+}
+
+function Resolve-AccountDir {
+  param([string]$IndexRoot, [string]$WantAccount)
+
+  # Layout: <root>/<accountUuid>/<orgUuid>/local_*.json -- account FIRST.
+  # Confirmed on macOS three ways: ~/.claude.json oauthAccount, config.json
+  # lastKnownAccountUuid, and the app's own telemetry blobs. See SCHEMA.md.
   $pairs = @()
   Get-ChildItem $IndexRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-    $org = $_
-    Get-ChildItem $org.FullName -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+    $account = $_
+    Get-ChildItem $account.FullName -Directory -ErrorAction SilentlyContinue | ForEach-Object {
       $pairs += [pscustomobject]@{
         Path    = $_.FullName
-        Org     = $org.Name
-        Account = $_.Name
+        Account = $account.Name
+        Org     = $_.Name
         Records = @(Get-ChildItem $_.FullName -Filter 'local_*.json' -File -ErrorAction SilentlyContinue).Count
       }
     }
   }
 
   if (-not $pairs) {
-    throw "No <orgUuid>/<accountUuid> folder pair under $IndexRoot. Start a session in the app first."
+    throw "No <accountUuid>/<orgUuid> folder pair under $IndexRoot. Start a session in the app first."
+  }
+  if ($WantAccount) {
+    $match = @($pairs | Where-Object { $_.Account -eq $WantAccount })
+    if (-not $match) {
+      throw ("No folder for account $WantAccount under $IndexRoot." + [Environment]::NewLine +
+             "Found: " + (($pairs | Select-Object -ExpandProperty Account -Unique) -join ', '))
+    }
+    return ($match | Sort-Object Records -Descending | Select-Object -First 1)
   }
   if ($pairs.Count -gt 1) {
-    Write-Warn 'Multiple account folders found; using the one with the most records:'
-    $pairs | ForEach-Object { Write-Host "      $($_.Org)\$($_.Account)  ($($_.Records) records)" }
+    Write-Warn 'Multiple account/org folders found; using the one with the most records:'
+    $pairs | ForEach-Object { Write-Host "      $($_.Account)\$($_.Org)  ($($_.Records) records)" }
   }
   return ($pairs | Sort-Object Records -Descending | Select-Object -First 1)
 }
 
 # ----------------------------------------------------------- transcript parse
 
+# A worktree session runs in <repo>/.claude/worktrees/<name>; the app records the
+# repo root as originCwd and the worktree as cwd. 39 of 69 observed records have
+# originCwd != cwd, almost all of them this shape. Deriving originCwd = cwd took
+# this from 59/62 correct down to 23/62.
+function Get-OriginCwd {
+  param([string]$Cwd)
+  if ($Cwd -match '^(.*)[\\/]\.claude[\\/]worktrees[\\/][^\\/]+') { return $Matches[1] }
+  return $Cwd
+}
+
 function Read-Transcript {
-  param([string]$Path)
+  param([string]$Path, [string]$Stem)
 
   $firstTs = $null; $lastTs = $null; $cwd = $null
+  $ownFirstTs = $null; $ownCwd = $null
   $customTitle = $null; $aiTitle = $null; $firstUserMsg = $null
-  $userCount = 0; $hasMainChain = $false
+  $turns = 0; $hasMainChain = $false
 
   # Explicit UTF8: PowerShell 5.1's Get-Content defaults to the ANSI codepage
   # and will silently mojibake any non-ASCII title.
@@ -182,40 +272,67 @@ function Read-Transcript {
     if ($o.PSObject.Properties.Name -contains 'isSidechain' -and $o.isSidechain -eq $false) { $hasMainChain = $true }
     if ($o.type -eq 'custom-title' -and $o.customTitle) { $customTitle = $o.customTitle }
     if ($o.type -eq 'ai-title'     -and $o.aiTitle)     { $aiTitle     = $o.aiTitle }
+
+    # A resumed session's transcript carries the parent's lines forward. They
+    # keep the parent's sessionId and the app never counted them -- scoping to
+    # our own lines is what keeps createdAt off the parent's start date (one
+    # observed session was 19 days out) and completedTurns off its turn count.
+    $own = ($o.sessionId -eq $Stem)
+
     if ($o.timestamp) {
       if (-not $firstTs) { $firstTs = $o.timestamp }
       $lastTs = $o.timestamp
+      if ($own -and -not $ownFirstTs) { $ownFirstTs = $o.timestamp }
     }
-    if (-not $cwd -and $o.cwd) { $cwd = $o.cwd }
+    if ($o.cwd) {
+      if (-not $cwd) { $cwd = $o.cwd }
+      if ($own -and -not $ownCwd) { $ownCwd = $o.cwd }
+    }
 
-    if ($o.type -eq 'user') {
-      $userCount++
-      if (-not $firstUserMsg -and $o.isSidechain -eq $false) {
-        $c = $o.message.content
-        $txt = $null
-        if ($c -is [string]) { $txt = $c }
-        elseif ($c) { foreach ($b in $c) { if ($b.type -eq 'text' -and $b.text) { $txt = $b.text; break } } }
-        if ($txt) {
-          $t = $txt.Trim()
-          # Skip harness scaffolding so the title is the human's actual words.
-          if ($t -notmatch '^<(local-command|command-name|command-message|command-args|system-reminder|user-prompt-submit)' -and
-              $t -notmatch '^Caveat: The messages below were generated' -and
-              $t -notmatch '^\[Request interrupted') {
-            $firstUserMsg = $t
-          }
-        }
+    if ($o.type -ne 'user') { continue }
+    if ($o.isSidechain) { continue }
+
+    # tool_result lines are the harness feeding results back, not turns.
+    $c = $o.message.content
+    $isToolResult = $false
+    if ($c -isnot [string] -and $c) {
+      foreach ($b in $c) { if ($b.type -eq 'tool_result') { $isToolResult = $true; break } }
+    }
+    if ($isToolResult) { continue }
+
+    $txt = $null
+    if ($c -is [string]) { $txt = $c }
+    elseif ($c) { foreach ($b in $c) { if ($b.type -eq 'text' -and $b.text) { $txt = $b.text; break } } }
+    $t = if ($txt) { $txt.Trim() } else { '' }
+
+    # completedTurns == human turns belonging to THIS session. isMeta lines are
+    # harness bookkeeping; "[Request interrupted...]" is a synthetic user line.
+    # Slash-command scaffolding DOES count as a turn -- excluding it drops the
+    # exact-match rate from 41/61 to 33/61. See SCHEMA.md.
+    if ($own -and -not $o.isMeta -and -not $t.StartsWith('[Request interrupted')) {
+      $turns++
+    }
+
+    if (-not $firstUserMsg -and $t) {
+      # Skip harness scaffolding so the title is the human's actual words.
+      if ($t -notmatch '^<(local-command|command-name|command-message|command-args|system-reminder|user-prompt-submit)' -and
+          $t -notmatch '^Caveat: The messages below were generated' -and
+          $t -notmatch '^\[Request interrupted') {
+        $firstUserMsg = $t
       }
     }
   }
 
+  $useCwd = if ($ownCwd) { $ownCwd } else { $cwd }
   [pscustomobject]@{
-    FirstTs      = $firstTs
+    FirstTs      = if ($ownFirstTs) { $ownFirstTs } else { $firstTs }
     LastTs       = $lastTs
-    Cwd          = $cwd
+    Cwd          = $useCwd
+    OriginCwd    = (Get-OriginCwd $useCwd)
     CustomTitle  = $customTitle
     AiTitle      = $aiTitle
     FirstUserMsg = $firstUserMsg
-    UserCount    = $userCount
+    Turns        = $turns
     HasMainChain = $hasMainChain
   }
 }
@@ -235,7 +352,11 @@ function Get-SessionTitle {
   # custom-title (the user's own /rename) beats the model's ai-title, which
   # beats raw first-message text. The app's own /desktop import drops
   # customTitle entirely -- see anthropics/claude-code#83051.
-  if ($Parsed.CustomTitle) { return @{ Title = $Parsed.CustomTitle; Source = 'custom' } }
+  #
+  # titleSource is the app's own enum and takes only 'user' or 'auto' -- across
+  # 69 observed records, all 24 with titleSource 'user' have a title identical
+  # to the transcript's custom-title. 'custom' is a value the app never writes.
+  if ($Parsed.CustomTitle) { return @{ Title = $Parsed.CustomTitle; Source = 'user' } }
   if ($Parsed.AiTitle)     { return @{ Title = $Parsed.AiTitle;     Source = 'auto'   } }
   if ($Parsed.FirstUserMsg) {
     $s = ($Parsed.FirstUserMsg -replace '\s+', ' ').Trim()
@@ -249,9 +370,11 @@ function Get-SessionTitle {
 
 Write-Step 'Locating the Claude Desktop session index'
 $indexRoot = Resolve-IndexRoot -Override $IndexDir
-$acct      = Resolve-AccountDir -IndexRoot $indexRoot
+$acct      = Resolve-AccountDir -IndexRoot $indexRoot -WantAccount $Account
 Write-Ok "index:   $($acct.Path)"
-Write-Ok "org=$($acct.Org)  account=$($acct.Account)"
+Write-Ok "account=$($acct.Account)  org=$($acct.Org)"
+
+Write-AccountMismatch -Account $acct.Account -Signals (Get-AccountSignals -IndexRoot $indexRoot)
 
 $manifestPath = Join-Path $acct.Path '.restore-manifest.json'
 $authored = @{}
@@ -261,30 +384,64 @@ if (Test-Path $manifestPath) {
   } catch { }
 }
 
-Write-Step 'Selecting a reference record written by the app itself'
-$existing      = @{}
-$refCandidates = @()
+Write-Step 'Modelling the schema on records the app wrote here'
+$existing   = @{}
+$appWritten = @()
 foreach ($f in Get-ChildItem $acct.Path -Filter 'local_*.json' -File -ErrorAction SilentlyContinue) {
   try { $r = Get-Content $f.FullName -Raw -Encoding UTF8 | ConvertFrom-Json } catch { continue }
   if ($r.cliSessionId) { $existing[$r.cliSessionId] = $f.Name }
-  if (-not $authored.ContainsKey($r.sessionId)) { $refCandidates += $r }
+  if (-not $authored.ContainsKey($r.sessionId)) { $appWritten += $r }
 }
 
-if (-not $refCandidates) {
+if (-not $appWritten) {
   throw ("No app-written record to model the schema on." + [Environment]::NewLine + [Environment]::NewLine +
          "Open Claude Desktop, start a Code session in a real folder, send one message," + [Environment]::NewLine +
          "let it finish, quit, then re-run. This tool deliberately refuses to invent a" + [Environment]::NewLine +
-         "schema: the format is undocumented and changes between app versions.")
+         "schema: the format is undocumented and the field set varies per session.")
 }
 
-# Richest record wins -- most likely to carry the full current field set.
-$ref = $refCandidates |
-  Sort-Object @{ Expression = { @($_.PSObject.Properties).Count } } -Descending |
-  Select-Object -First 1
+# The field set is CONDITIONAL on what a session did: worktree fields only for
+# worktree sessions, pr* only where a PR was opened, enabledMcpTools only where
+# remote MCP servers were configured. Cloning any single record therefore stamps
+# its circumstances onto every restored session -- the richest record on the
+# machine this was validated against carries prNumber 109, a worktree path and a
+# stale promptSuggestion. Keep only what is near-universal.
+#
+# With one app-written record the threshold degenerates to "every field in that
+# record", which is the old behaviour. It gets strictly better as the app writes
+# more records.
+$presence = @{}
+foreach ($r in $appWritten) {
+  foreach ($name in $r.PSObject.Properties.Name) {
+    if ($presence.ContainsKey($name)) { $presence[$name]++ } else { $presence[$name] = 1 }
+  }
+}
+$n = $appWritten.Count
+$keep = @($presence.Keys | Where-Object {
+  ($presence[$_] / $n) -ge $CoreThreshold -and $NeverInherit -notcontains $_
+})
 
-$refFields = @($ref.PSObject.Properties.Name)
-Write-Ok "reference carries $($refFields.Count) fields"
-$inherited = @($refFields | Where-Object { $DerivedFields -notcontains $_ -and -not $ResetFields.Contains($_) })
+# Most recently active first, so "latest value" means what it says.
+$ordered = @($appWritten | Sort-Object @{ Expression = {
+  if ($_.lastActivityAt) { [int64]$_.lastActivityAt } else { [int64]0 } } } -Descending)
+
+$core = [ordered]@{}
+foreach ($prop in $ordered[0].PSObject.Properties) {
+  if ($keep -contains $prop.Name) { $core[$prop.Name] = $prop.Value }
+}
+foreach ($r in $ordered) {
+  foreach ($prop in $r.PSObject.Properties) {
+    if (($keep -contains $prop.Name) -and -not $core.Contains($prop.Name)) { $core[$prop.Name] = $prop.Value }
+  }
+}
+
+Write-Ok "$n app-written record(s); $($presence.Count) distinct field(s) seen"
+Write-Ok "structural core: $($core.Count) field(s) present in >=$([int]($CoreThreshold*100))% of them"
+$dropped = @($presence.Keys | Where-Object { -not $core.Contains($_) -and $DerivedFields -notcontains $_ } | Sort-Object)
+if ($dropped) {
+  Write-Host "      conditional/per-session, not inherited: $($dropped -join ', ')" -ForegroundColor DarkGray
+}
+$inherited = @($core.Keys | Where-Object { $DerivedFields -notcontains $_ -and -not $ResetFields.Contains($_) })
 if ($inherited) {
   Write-Host "      inheriting verbatim: $($inherited -join ', ')" -ForegroundColor DarkGray
 }
@@ -330,7 +487,7 @@ foreach ($f in $files) {
     Add-Skip "still active (modified < $MinIdleMinutes min ago)"; continue
   }
 
-  $p = Read-Transcript -Path $f.FullName
+  $p = Read-Transcript -Path $f.FullName -Stem $stem
   if (-not $p.HasMainChain) { Add-Skip 'no main chain (sidechain-only)'; continue }
   if (-not $p.Cwd)          { Add-Skip 'no cwd recorded';                continue }
   if (-not $p.FirstTs)      { Add-Skip 'no timestamps';                  continue }
@@ -338,23 +495,23 @@ foreach ($f in $files) {
 
   $t = Get-SessionTitle -Parsed $p
 
-  # Clone the reference, then override. Field order follows the reference so the
-  # result is shaped like something the app wrote.
+  # Start from the structural core, then override. Field order follows the most
+  # recent app-written record so the result is shaped like something the app wrote.
   $rec = [ordered]@{}
-  foreach ($prop in $ref.PSObject.Properties) {
-    if ($ResetFields.Contains($prop.Name)) { $rec[$prop.Name] = $ResetFields[$prop.Name] }
-    else                                   { $rec[$prop.Name] = $prop.Value }
+  foreach ($k in $core.Keys) {
+    if ($ResetFields.Contains($k)) { $rec[$k] = $ResetFields[$k] }
+    else                           { $rec[$k] = $core[$k] }
   }
   $rec['sessionId']      = 'local_' + [guid]::NewGuid().ToString()
   $rec['cliSessionId']   = $stem
   $rec['cwd']            = $p.Cwd
-  $rec['originCwd']      = $p.Cwd
+  $rec['originCwd']      = $p.OriginCwd
   $rec['createdAt']      = (ConvertTo-EpochMs $p.FirstTs)
   $rec['lastActivityAt'] = (ConvertTo-EpochMs $p.LastTs)
   $rec['lastFocusedAt']  = (ConvertTo-EpochMs $p.LastTs)
   $rec['title']          = $t.Title
   $rec['titleSource']    = $t.Source
-  $rec['completedTurns'] = $p.UserCount
+  $rec['completedTurns'] = $p.Turns
 
   $records += , [pscustomobject]$rec
 }

@@ -1,0 +1,54 @@
+name: New observation
+description: A record, field, platform or build this repo hasn't seen
+title: "[observation] "
+labels: ["observation"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is the most useful kind of issue here. You don't need to write code —
+        the numbers are the contribution.
+
+        Please don't paste a whole record without checking it first: `cwd`,
+        `title` and `originCwd` contain real paths and project names, and
+        `remoteMcpServersConfig` can be very large.
+  - type: input
+    id: build
+    attributes:
+      label: Claude Desktop version
+      placeholder: "1.37937.3"
+    validations: { required: true }
+  - type: input
+    id: cli
+    attributes:
+      label: Bundled claude-code version
+      placeholder: "2.1.246"
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options: ["Windows (Store/MSIX)", "Windows (direct)", "macOS", "Linux", "other"]
+    validations: { required: true }
+  - type: input
+    id: n
+    attributes:
+      label: How many app-written records did you look at?
+      description: >
+        n=1 is still worth reporting — just say so. This repo has twice been
+        wrong by generalising from a single record.
+      placeholder: "69"
+    validations: { required: true }
+  - type: textarea
+    id: finding
+    attributes:
+      label: What did you find?
+      description: >
+        Field names and presence counts are ideal, e.g. "`foo` present in 12/40".
+        A field SCHEMA.md doesn't list, a value outside a documented enum, or a
+        counter-example to something it claims are all valuable.
+    validations: { required: true }
+  - type: textarea
+    id: contradicts
+    attributes:
+      label: Does this contradict anything in SCHEMA.md?
+      description: If so, quote the line. Retractions are welcome and expected.

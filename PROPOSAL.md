@@ -1,7 +1,7 @@
 # Proposal: let Claude Desktop adopt transcripts it didn't create
 
 *Unofficial. Written against Claude Desktop `1.37937.3` / claude-code `2.1.246`,
-Windows Store build. Nothing here is an Anthropic position.*
+on a Windows Store build and on macOS. Nothing here is an Anthropic position.*
 
 ## The problem in one line
 
@@ -44,16 +44,29 @@ materialise one.
 Discovery rules, which matter more than they look:
 
 - Only `<project>/<uuid>.jsonl`. Anything deeper is a subagent transcript or
-  workflow journal. On one real machine that's the difference between 60 entries
-  and 233.
+  workflow journal. On two real machines that's the difference between 60
+  entries and 233, and between 113 and 329.
 - Skip names starting `agent-`.
 - Require at least one line with `isSidechain: false`.
 - **Skip anything with a `deleted_<cliSessionId>` tombstone.** Without this,
-  adoption resurrects every session the user deliberately deleted.
+  adoption resurrects every session the user deliberately deleted — 39 of them
+  on one of the machines checked, all with transcripts still on disk.
 - Skip transcripts being actively written.
 
-Field derivation is already proven — see [SCHEMA.md](SCHEMA.md); an independent
-implementation reproduced the app's own record to within a second.
+Field derivation is already proven — see [SCHEMA.md](SCHEMA.md). An independent
+implementation was checked against 62 records the app wrote for the same
+sessions: `createdAt` within 60 s on all 62, `originCwd` 59/62, `cwd` and
+`title` 56/62.
+
+Two derivations are worth calling out because a naive implementation gets them
+wrong, and the app has the information to get them right for free:
+
+- `originCwd` is the repo root, not `cwd`, for worktree sessions — 39 of 69
+  records on one machine.
+- Resumed sessions carry the parent's lines forward in the transcript, keeping
+  the parent's `sessionId`. Counting or timestamping without filtering on the
+  session's own id puts `createdAt` on the parent's start date (19 days out, in
+  one observed case).
 
 ### 2. Make it cheap
 
@@ -74,9 +87,13 @@ once.
 [#83051](https://github.com/anthropics/claude-code/issues/83051): sessions
 imported via `/desktop` always display "General coding session", even when the
 CLI session has an explicit title from `--name` or `/rename`. The transcript
-carries it on a `custom-title` line. 53 of 60 transcripts on the machine tested
-had one — so this isn't an edge case, it's the common path. Same derivation as
-above; the fix is reading a field that's already on disk.
+carries it on a `custom-title` line. 53 of 60 transcripts on one machine and 95
+of 113 on another had one — so this isn't an edge case, it's the common path.
+Same derivation as above; the fix is reading a field that's already on disk.
+
+The index shows the app already knows how: `titleSource: "user"` exists and is
+used correctly for titles set inside the app, on 24 of 69 records. The gap is
+only that a CLI-side `/rename` never reaches the record.
 
 ### 4. Treat index damage as recoverable
 
@@ -104,13 +121,43 @@ it looks like when this hasn't been decided.
 **Should the format be documented?** Four community tools already write these
 records. Documenting the format — even as explicitly unstable — is strictly
 safer than the status quo, where the same work is redone from observation every
-few months against a schema that has drifted six fields in under a year.
+few months.
+
+Worth documenting first: the field set is **conditional**, not fixed. 69 records
+from one install carry 44 distinct fields across 44 distinct field-set
+signatures. Every tool in this space assumes a fixed list, and the two obvious
+strategies both fail — hardcoding a list writes fields sessions shouldn't have,
+and cloning a live record copies its `prNumber`, its worktree path, and
+potentially its `transcriptUnavailable: true` onto everything it writes.
 
 **Artifacts across accounts.** Sessions migrated from a machine signed into a
 different account show every artifact as unavailable, because artifacts are
-server-side and account-scoped. Nothing local can fix this and the current
-message reads as data loss. A clearer message ("published by a different
-account") would save some confusion.
+server-side and account-scoped. Confirmed from both ends: the source machine's
+transcripts and all 26 referenced artifact UUIDs belong to account A, while the
+destination machine is signed in as account B and its index contains only B's
+folder.
+
+Nothing local can fix it, and the current message — "not available or might be
+deleted" — reads as data loss when the data is fine and simply belongs to
+another account. A clearer message ("published by a different account") would
+save some confusion. The app has what it needs to say so: the record's own
+position in the `<accountUuid>/<orgUuid>` tree.
+
+There is a second, sharper version of this. Because the picker only reads the
+signed-in account's folder, a user who restores sessions while signed in as B
+and later signs in as A does not see a partial result — they see an empty
+picker, with no indication that their sessions exist one folder over. The two
+halves cannot currently both be satisfied:
+
+| Signed in as | Sessions visible | Artifacts resolve |
+|---|---|---|
+| B (where records were written) | yes | no |
+| A (which owns the artifacts) | no | yes |
+
+An adoption pass fixes this for free: if the app can materialise records from
+transcripts, it materialises them for whichever account is signed in, and the
+choice disappears. Absent that, surfacing "N sessions found under another
+account" in the empty picker would at least make the state legible.
 
 ## What was actually verified
 
@@ -119,6 +166,12 @@ account") would save some confusion.
 - Derivation cross-checked against a record the app wrote for the same session.
 - Tombstone pair mechanism (`deleted_<sessionId>` + `deleted_<cliSessionId>`,
   identical epoch-ms payloads) confirmed by correlating 10 UI deletions against
-  what a restore pass wanted to recreate.
-- Not verified: `completedTurns` semantics (`user` vs `assistant` line count) —
-  the one available reference record had one of each.
+  what a restore pass wanted to recreate, then confirmed again at scale: 78
+  tombstones on a second machine resolve into exactly 39 pairs, no singletons.
+- `completedTurns` semantics, previously unverified: it counts **user** turns,
+  not assistant lines. Sessions here run 19 turns against 784 assistant lines,
+  3 against 531. See [SCHEMA.md](SCHEMA.md) for the exact predicate.
+- Directory order is `<accountUuid>/<orgUuid>`, confirmed three independent
+  ways. An earlier revision of SCHEMA.md claimed the reverse; that was wrong.
+- Artifact account-scoping confirmed on both machines: the account owning the
+  transcripts and artifacts is signed in on neither.

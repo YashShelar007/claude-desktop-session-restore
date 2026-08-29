@@ -1,0 +1,73 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "claude-desktop-session-restore"
+version = "0.2.0"
+description = "Rebuild the Claude Desktop Code session picker from CLI transcripts, without hardcoding an undocumented schema."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+keywords = ["claude", "claude-code", "claude-desktop", "sessions", "recovery", "migration"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Utilities",
+]
+# Deliberately none. This is a recovery tool: someone runs it when their session
+# history has just disappeared, often on a machine's system Python. The 3.9
+# floor is macOS's own /usr/bin/python3 -- requiring a venv to recover your data
+# is a worse experience than the bug being fixed.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.scripts]
+restore-desktop-sessions = "claude_desktop_restore.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/YashShelar007/claude-desktop-session-restore"
+Issues = "https://github.com/YashShelar007/claude-desktop-session-restore/issues"
+Schema = "https://github.com/YashShelar007/claude-desktop-session-restore/blob/main/SCHEMA.md"
+Proposal = "https://github.com/YashShelar007/claude-desktop-session-restore/blob/main/PROPOSAL.md"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/claude_desktop_restore"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Tests that read the machine's real Claude state are opt-in: `pytest -m real`.
+# Everything else runs against fixtures in a temp dir.
+markers = ["real: reads the real ~/.claude and Claude Desktop state on this machine"]
+addopts = "-m 'not real'"
+
+[tool.ruff]
+line-length = 90
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = [
+    # read_account_signals and read_records deliberately swallow anything a
+    # malformed or unreadable file throws: a single bad record must never stop a
+    # recovery run. Each site says so.
+    "BLE001",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests read fixture files with open(...).read() throughout. The handle's
+# lifetime genuinely does not matter in a test process that exits immediately,
+# and a context manager per assertion would bury what is being asserted.
+"tests/*" = ["SIM115"]
