@@ -2,8 +2,15 @@ name: Release
 
 # Publishes to PyPI when a version tag is pushed.
 #
+# Publishing is gated on the repository variable PUBLISH_TO_PYPI. Until it is
+# set to "true", tagging a release builds and verifies the artifact but does not
+# upload it -- so a tag can be pushed before PyPI is configured, and a fork can
+# cut its own tags without credentials, without either producing a red run.
+#
+#   gh variable set PUBLISH_TO_PYPI --body true
+#
 # Uses PyPI Trusted Publishing, so there is no API token in this repo and
-# nothing to leak or rotate. One-time setup on PyPI:
+# nothing to leak or rotate. One-time setup on PyPI, before flipping it:
 #
 #   pypi.org -> Your projects -> Publishing -> Add a new pending publisher
 #     PyPI project name : claude-desktop-session-restore
@@ -43,6 +50,7 @@ jobs:
 
   publish:
     needs: build
+    if: vars.PUBLISH_TO_PYPI == 'true'
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -53,3 +61,14 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  publish-skipped:
+    # Says out loud why nothing was uploaded, so a green run is not mistaken for
+    # a successful publish.
+    needs: build
+    if: vars.PUBLISH_TO_PYPI != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "::notice::Built and verified, but not uploaded."
+          echo "::notice::Set the PUBLISH_TO_PYPI repository variable to 'true' to publish."
