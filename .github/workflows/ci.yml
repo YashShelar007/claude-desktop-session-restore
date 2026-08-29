@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor is 3.9 because that is macOS's own /usr/bin/python3, and a
+        # recovery tool should run without a venv. Windows and macOS are both
+        # here because the index lives in a different place on each and the path
+        # probing is real logic, not a footnote.
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install -e ".[dev]"
+      # The `real` marker is excluded by default in pyproject: those tests read
+      # the machine's own Claude state, which CI does not have.
+      - run: pytest -q
+      - name: The zero-install path must work too
+        run: python restore_desktop_sessions.py --help
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -e ".[dev]"
+      - run: ruff check src tests restore_desktop_sessions.py
+      - run: ruff format --check src tests restore_desktop_sessions.py
+
+  safety-guard:
+    # The rules in CONTRIBUTING.md > Hard rules are load-bearing, so they are
+    # enforced rather than merely documented. Each corresponds to a way this
+    # tool could destroy something a user cannot get back, or write records the
+    # app will reject. Runs locally too:
+    #     python3 scripts/check_invariants.py
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python scripts/check_invariants.py

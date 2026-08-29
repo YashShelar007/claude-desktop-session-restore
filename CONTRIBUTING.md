@@ -53,34 +53,88 @@ If you can't reach n>1, say so in the text. "Observed once" is a fine claim.
    heuristic, or a tombstone that isn't part of a pair, is more valuable than
    another confirmation.
 
-## Hard rules for anything that writes
+## Scope: what will be declined
 
-These are not style preferences; each one corresponds to a way this has already
-gone wrong.
+This tool creates index records and never removes them, and it never writes
+anywhere near the transcripts. Those two properties are why it is safe to run on
+a machine where something has already gone wrong. PRs that change them will be
+declined regardless of quality:
 
-- **Never write under `~/.claude/projects/`.** Transcripts are the source of
-  truth and are read-only. Everything is recoverable as long as they are intact.
-- **Dry-run is the default.** Writing requires an explicit flag.
-- **Back up the index before writing**, and print the restore command.
+- **No writes under `~/.claude/projects/`.** Transcripts are the source of
+  truth. Every recovery this tool performs depends on them being untouched.
+- **No deleting index records.** A bug in a create path leaves clutter. A bug in
+  a delete path is unrecoverable.
+- **No network.** No telemetry, no crash reporting, no schema upload. Records
+  contain project paths and session titles.
+
+The full list, with reasons, is in [ROADMAP.md](ROADMAP.md#out-of-scope).
+
+## Hard rules
+
+Each corresponds to a way this has already gone wrong, or would. Most are
+enforced, not just documented — `scripts/check_invariants.py` runs in CI and
+locally, and fails the build if a refactor drops one while keeping tests green.
+
+- **Never write under `~/.claude/projects/`.** Pinned by
+  `check_transcripts_are_read_only` and by
+  `tests/test_cli.py::TestTranscriptsAreReadOnly`, which hashes the whole tree
+  before and after an `--apply` run.
+- **Dry run is the default.** `--apply` is opt-in. Pinned by
+  `check_dry_run_is_the_default`.
+- **Back up the index before writing**, not after, and print the restore
+  command. Pinned by `check_backup_precedes_write`.
 - **Honour `deleted_*` tombstones.** See [SCHEMA.md](SCHEMA.md#tombstones) — all
-  four prior tools resurrect deleted sessions because they don't.
+  four prior tools in this space resurrect deleted sessions because they don't.
+  Pinned by `check_tombstones_are_honoured` and `tests/test_cli.py`.
 - **Never write a UTF-8 BOM.** The app's parser rejects the record outright.
-- **Don't inherit conditional fields.** The record's field set varies per
-  session; cloning a live record copies its PR number and worktree path onto
-  everything you write.
+  `utf-8-sig` is correct for reading and wrong for writing. Pinned by
+  `check_no_bom_on_write`.
+- **Don't inherit conditional fields.** The field set varies per session;
+  cloning a live record copies its PR number, its worktree path and possibly
+  `transcriptUnavailable: true` onto everything you write. Pinned by
+  `tests/test_records.py`.
+- **Don't add a field the app didn't write.** Reset fields are reset only if the
+  structural core already carries them.
 
 ## Testing a change
 
-There is no CI, because the thing under test is somebody's live app state. The
-bar is:
-
 ```bash
-python3 restore_desktop_sessions.py            # dry run, writes nothing
+pip install -e ".[dev]"
+pytest -q                                   # 105 tests, no real state touched
+ruff check src tests restore_desktop_sessions.py
+python3 scripts/check_invariants.py
 ```
 
-If you changed a derivation, validate it against records the app wrote for the
-same sessions rather than against your own expectations — that is how every bug
-in the last pass was found. The README's validation table shows the format.
+Everything above runs against fixtures in a temp dir. Tests that read this
+machine's actual Claude state are marked `real` and excluded by default:
 
-The PowerShell and Python implementations must stay behaviourally identical.
-If you change one, change the other, and say in the PR which one you actually ran.
+```bash
+pytest -m real      # needs a real index and ~/.claude/projects; writes nothing
+```
+
+The `real` suite is the important one when you touch a derivation. It compares
+every derived field against the record the app itself wrote for the *same*
+session, which is the only check that has ever caught a real bug here — four of
+them, all invisible against a single hand-picked record. It is also what
+produces the README's validation table.
+
+If you change a documented number, change the README in the same PR and say
+which command you ran. A number in the docs that no test reproduces is a bug.
+
+**The two implementations must stay behaviourally identical.** If you change
+`src/claude_desktop_restore/`, change `Restore-DesktopSessions.ps1` too, and say
+in the PR which one you actually executed. They are currently not equally
+tested — see the caveat in the README.
+
+## Releasing
+
+```bash
+# on develop, with SCHEMA.md and the version in pyproject.toml both current
+gh pr create --base main --head develop
+# once merged:
+git checkout main && git pull
+git tag v0.2.1 && git push origin v0.2.1
+```
+
+The release workflow refuses to publish if the tag does not match the version in
+`pyproject.toml`, so bump that in the same PR.

@@ -126,20 +126,39 @@ tool reads and writes UTF-8 explicitly at both ends.
 Two implementations, same behaviour and same flags. Claude Desktop must have run
 at least once and created one Code session, so there is a record to model on.
 
-**Python 3.8+, stdlib only** — no PowerShell needed on macOS or Linux:
+**Python 3.9+, no dependencies** — no PowerShell needed on macOS or Linux.
+
+Zero install, which matters when your history has just vanished and you would
+rather not set up a virtualenv first. Any Python 3.9+ works, including macOS's
+own `/usr/bin/python3`:
+
+```bash
+git clone https://github.com/YashShelar007/claude-desktop-session-restore
+cd claude-desktop-session-restore
+python3 restore_desktop_sessions.py
+```
+
+Or install it:
+
+```bash
+pipx install claude-desktop-session-restore
+restore-desktop-sessions
+```
+
+Either way, the first run writes nothing:
 
 ```bash
 # Dry run - report what would be indexed, write nothing
-python3 restore_desktop_sessions.py
+restore-desktop-sessions
 
 # Cautious first pass: 5 most recent
-python3 restore_desktop_sessions.py --limit 5 --apply
+restore-desktop-sessions --limit 5 --apply
 
 # ...confirm they open with real history, then do the rest
-python3 restore_desktop_sessions.py --apply
+restore-desktop-sessions --apply
 
 # After a migration where only some paths exist on this machine
-python3 restore_desktop_sessions.py --cwd-prefix /Users/you/repos --apply
+restore-desktop-sessions --cwd-prefix /Users/you/repos --apply
 ```
 
 **PowerShell 5.1+** (ships with Windows):
@@ -212,10 +231,13 @@ nothing and suggests the app has never run.
   Claude Desktop `1.37937.3` / bundled claude-code `2.1.246`, on a Windows Store
   build and on macOS. It can change in any update. The structural-core design is
   a hedge against that, not a guarantee.
-- **The PowerShell and Python paths are not equally tested.** The Python script
-  was validated against 62 app-written macOS records (see below). The PowerShell
-  script carries the same corrections but has not been re-run since — there was
-  no PowerShell on the macOS machine the fixes were made on.
+- **The PowerShell and Python paths are not equally tested.** The Python
+  implementation has 105 tests, CI on Linux/macOS/Windows, and was validated
+  against 62 app-written macOS records (see below). The PowerShell script
+  carries the same corrections but has not been re-run since — there was no
+  PowerShell on the machine the fixes were made on. If you are on Windows,
+  running it once and reporting back is the single most useful thing you could
+  contribute.
 - **Artifacts won't follow across accounts.** Artifacts are server-side and
   keyed to the account that published them. Sessions migrated from a machine
   signed into a different account will show their artifacts as unavailable, and
@@ -257,17 +279,28 @@ nothing and suggests the app has never run.
 ## How the derivations were checked
 
 Every field is derived from the transcript and compared against the record the
-app wrote for the *same* session. 62 macOS sessions could be matched:
+app wrote for the *same* session. Reproduce it on your own machine — it writes
+nothing:
+
+```bash
+pytest -m real -s
+```
+
+On the reference macOS machine, 67 sessions matched:
 
 | Field | Agrees with the app's own record |
 |---|---|
-| `createdAt` | 62/62 within 60 s (median +2.0 s — the app stamps at session creation, before the first message) |
-| `originCwd` | 59/62 |
-| `cwd` | 56/62 |
-| `title` | 56/62 |
+| `createdAt` | 67/67 within 60 s (median +2.0 s — the app stamps at session creation, before the first message) |
+| `originCwd` | 63/67 |
+| `title` | 61/67 |
+| `cwd` | 60/67 |
+| `completedTurns` | 46/67 exact, 56/67 within ±1 |
 | `lastActivityAt` | 52/62 within 60 s (the rest are transcripts that kept growing after the app stopped tracking) |
-| `completedTurns` | 42/61 exact, 50/61 within ±1 |
 | `titleSource` | 29/59 |
+
+The first five are what `pytest -m real` prints. The last two were measured by
+hand on a slightly smaller corpus and are not yet reproduced by a test, which by
+this repo's own standard makes them the weakest rows in the table.
 
 Two of these deserve a note.
 
@@ -283,10 +316,37 @@ answer.
 sessions where the app records the repo root. Deriving it from the
 `.claude/worktrees/<name>` path segment took it from 23/62 to 59/62.
 
+## Project layout
+
+```
+src/claude_desktop_restore/
+  paths.py         index discovery, account/org resolution, account signals
+  transcripts.py   reading .jsonl, deriving title/cwd/timestamps/turns
+  records.py       the structural core, and assembling one record
+  index.py         everything that touches disk: tombstones, backup, writes
+  cli.py           argument parsing, selection, output
+tests/             105 tests against fixtures, plus a `real` suite (see below)
+scripts/
+  check_invariants.py   the safety rules, enforced rather than documented
+Restore-DesktopSessions.ps1   the Windows/PowerShell implementation
+```
+
+`index.py` is deliberately the only module that writes anything, so the rules
+that must never break are checkable in one place.
+
+Tests marked `real` read this machine's actual index and transcripts and
+reproduce the validation table below. They write nothing:
+
+```bash
+pytest -m real
+```
+
 ## See also
 
 - [SCHEMA.md](SCHEMA.md) — the record format, field by field, with the macOS/Windows/#58670 comparison
 - [PROPOSAL.md](PROPOSAL.md) — a proposed upstream fix
+- [CONTRIBUTING.md](CONTRIBUTING.md) — the claim standard, and what's most wanted
+- [ROADMAP.md](ROADMAP.md) — what's next, and what will never be built
 
 ## License
 
