@@ -138,3 +138,15 @@ git tag v0.2.1 && git push origin v0.2.1
 
 The release workflow refuses to publish if the tag does not match the version in
 `pyproject.toml`, so bump that in the same PR.
+
+Uploading to PyPI is gated on a repository variable, so a tag can be pushed
+before PyPI is configured — and a fork can cut its own tags without credentials
+— without either producing a failed run. The workflow builds and verifies the
+artifact either way, and says out loud when it skipped the upload:
+
+```bash
+gh variable set PUBLISH_TO_PYPI --body true
+```
+
+The one-time PyPI Trusted Publisher setup it needs first is documented at the
+top of [`.github/workflows/release.yml`](.github/workflows/release.yml).
