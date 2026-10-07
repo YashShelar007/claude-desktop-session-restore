@@ -21,6 +21,18 @@ from `claude --resume`.
 
 This tool regenerates the missing records.
 
+## Quick start
+
+```bash
+git clone https://github.com/YashShelar007/claude-desktop-session-restore
+cd claude-desktop-session-restore
+python3 restore_desktop_sessions.py
+```
+
+This is a dry run: it reports which sessions it would restore and writes
+nothing until you add `--apply`. Flags and the PowerShell version are under
+[Usage](#usage).
+
 ---
 
 ## Prior art
